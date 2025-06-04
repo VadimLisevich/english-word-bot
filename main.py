@@ -1,199 +1,221 @@
+import logging
 import os
 import json
-import logging
 import random
-from datetime import time
+import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, ContextTypes, filters
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import openai
 
-# === Загрузка переменных окружения ===
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-# === Логгирование ===
+# Включаем логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 
-# === Хранилища ===
-USERS_FILE = "users.json"
-WORDS_FILE = "words.json"
-PHRASES_FILE = "phrases.json"
+# Файлы
+SETTINGS_FILE = "user_settings.json"
+WORDS_FILE = "user_words.json"
 
-# === Загрузка данных ===
+# Категории
+CATEGORIES = ["Афоризмы", "Цитаты", "Кино", "Песни", "Любая тема"]
+
+# Загрузка / сохранение
 def load_json(filename):
-    if not os.path.exists(filename):
-        return {}
-    with open(filename, "r") as f:
-        return json.load(f)
+    if os.path.exists(filename):
+        with open(filename, 'r') as f:
+            return json.load(f)
+    return {}
 
 def save_json(filename, data):
-    with open(filename, "w") as f:
+    with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
 
-users = load_json(USERS_FILE)
-words = load_json(WORDS_FILE)
-phrases = load_json(PHRASES_FILE)
+user_settings = load_json(SETTINGS_FILE)
+user_words = load_json(WORDS_FILE)
 
-# === Фразы по категориям ===
-default_phrases = {
-    "Песни": [
-        {"sentence": "And I will always love you", "source": "Song", "translation": "И я всегда буду любить тебя"},
-        {"sentence": "Let it be, let it be", "source": "Song", "translation": "Пусть будет так, пусть будет так"}
-    ],
-    "Кино": [
-        {"sentence": "May the Force be with you", "source": "Movie", "translation": "Да пребудет с тобой сила"},
-        {"sentence": "Here's looking at you, kid", "source": "Movie", "translation": "Смотрю на тебя, малыш"}
-    ],
-    "Книга": [
-        {"sentence": "It was the best of times, it was the worst of times", "source": "Book", "translation": "Это было лучшее из времён, это было худшее из времён"}
-    ],
-    "Бизнес": [
-        {"sentence": "We are executing our plan to expand the business", "source": "Business meeting", "translation": "Мы выполняем наш план по расширению бизнеса"}
-    ]
-}
-
-# === Сохранение фразы с переводом ===
-async def translate_word(word: str) -> str:
-    try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a translation bot. Translate to Russian."},
-                {"role": "user", "content": f"Translate the word '{word}' to Russian"}
-            ]
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return "ошибка перевода"
-
-# === Создание пользовательских кнопок ===
-def build_menu(buttons):
-    return InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=data)] for text, data in buttons])
-
-# === Хендлеры ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    users[user_id] = {"step": "translate_words"}
-    save_json(USERS_FILE, users)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Привет! Я помогу тебе выучить английские слова 💬")
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Нужен ли тебе перевод слов?", reply_markup=build_menu([("Да", "translate_yes"), ("Нет", "translate_no")]))
-
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    users[user_id] = {"step": "translate_words"}
-    save_json(USERS_FILE, users)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Начнём заново настройки. Нужен ли тебе перевод слов?", reply_markup=build_menu([("Да", "translate_yes"), ("Нет", "translate_no")]))
-
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = str(query.from_user.id)
-    data = query.data
-
-    await query.answer()
-
-    if user_id not in users:
-        users[user_id] = {}
-
-    step = users[user_id].get("step")
-
-    if step == "translate_words":
-        users[user_id]["translate_words"] = data.endswith("yes")
-        users[user_id]["step"] = "daily_count"
-        await query.message.reply_text("Как часто отправлять фразы?", reply_markup=build_menu([("1 раз в день", "1"), ("2 раза в день", "2"), ("3 раза в день", "3")]))
-    elif step == "daily_count":
-        users[user_id]["times_per_day"] = int(data[0])
-        users[user_id]["step"] = "words_per_send"
-        await query.message.reply_text("Сколько слов за раз?", reply_markup=build_menu([("1", "1w"), ("2", "2w"), ("3", "3w"), ("5", "5w")]))
-    elif step == "words_per_send":
-        users[user_id]["words_per_send"] = int(data[0])
-        users[user_id]["step"] = "category"
-        await query.message.reply_text("Откуда брать фразы?", reply_markup=build_menu([("Песни", "Песни"), ("Кино", "Кино"), ("Книга", "Книга"), ("Бизнес", "Бизнес"), ("Любая тема", "Любая")]))
-    elif step == "category":
-        users[user_id]["category"] = data
-        users[user_id]["step"] = "translate_phrases"
-        await query.message.reply_text("Нужен ли перевод фраз?", reply_markup=build_menu([("Да", "phrases_yes"), ("Нет", "phrases_no")]))
-    elif step == "translate_phrases":
-        users[user_id]["translate_phrases"] = data.endswith("yes")
-        users[user_id]["step"] = "done"
-        await query.message.reply_text("🎉 Ура, мы всё настроили!\nЕсли захочешь что-то изменить — просто напиши /menu")
-        schedule_user_reminders(user_id)
-    save_json(USERS_FILE, users)
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    text = update.message.text.strip()
-    
-    if text.startswith("/delete "):
-        word = text[8:].strip().lower()
-        if user_id in words and word in words[user_id]:
-            words[user_id].remove(word)
-            await update.message.reply_text(f"Слово '{word}' удалено из базы ❌")
-        else:
-            await update.message.reply_text(f"Слово '{word}' не найдено в базе.")
-        return
-
-    if user_id not in users or users[user_id].get("step") != "done":
-        await update.message.reply_text("Напиши /start или /menu для настройки 😊")
-        return
-
-    word = text.lower()
-    if user_id not in words:
-        words[user_id] = []
-    if word not in words[user_id]:
-        words[user_id].append(word)
-        save_json(WORDS_FILE, words)
-
-        translation = await translate_word(word) if users[user_id].get("translate_words") else "🔇 перевод отключён"
-        category = users[user_id].get("category", "Любая")
-        example = random.choice(default_phrases.get(category, sum(default_phrases.values(), [])))
-
-        reply = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n📘 Пример:\n\"{example['sentence']}\" Source: {example['source']}.\n\"{example['translation']}\" Источник: {example['source']}."
-        await update.message.reply_text(reply)
-    else:
-        await update.message.reply_text(f"Слово '{word}' уже есть в базе.")
-
-# === Авторассылка ===
-async def send_reminders():
-    for user_id, data in users.items():
-        if data.get("step") != "done":
-            continue
-        times_per_day = data.get("times_per_day", 1)
-        hours = {1: [11], 2: [11, 15], 3: [11, 15, 19]}.get(times_per_day, [11])
-        now_hour = int(time().hour)
-        if now_hour not in hours:
-            continue
-        wlist = words.get(user_id, [])
-        if not wlist:
-            continue
-        category = data.get("category", "Любая")
-        example = random.choice(default_phrases.get(category, sum(default_phrases.values(), [])))
-        chosen = random.choice(wlist)
-        translation = await translate_word(chosen) if data.get("translate_words") else ""
-        text = f"🧠 Слово дня: {chosen} ({translation})\n📘 Пример:\n\"{example['sentence']}\"\n\"{example['translation']}\""
-        try:
-            await context.bot.send_message(chat_id=int(user_id), text=text)
-        except:
-            pass
-
-# === Планировщик ===
+# Словарь времён рассылки
+REMINDER_TIMES = {1: [11], 2: [11, 15], 3: [11, 15, 19]}
 scheduler = BackgroundScheduler()
-for hour in [11, 15, 19]:
-    scheduler.add_job(send_reminders, CronTrigger(hour=hour, minute=0))
 scheduler.start()
 
-# === Запуск ===
+# Начало / меню
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Привет! Я помогу тебе учить английские слова 📚\n\nДавай сначала настроимся.")
+    await ask_translate_words(update, context)
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Настроим всё заново 🛠️")
+    await ask_translate_words(update, context)
+
+# Настройки (вопросы)
+async def ask_translate_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    buttons = [
+        [InlineKeyboardButton("Да", callback_data="translate_words_yes")],
+        [InlineKeyboardButton("Нет", callback_data="translate_words_no")]
+    ]
+    await context.bot.send_message(chat_id=update.effective_chat.id,
+                                   text="Нужен ли перевод слов?", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def ask_times_per_day(user_id, context):
+    buttons = [[InlineKeyboardButton(str(n), callback_data=f"times_per_day_{n}")] for n in [1, 2, 3]]
+    await context.bot.send_message(chat_id=user_id, text="Как часто отправлять фразы?", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def ask_words_count(user_id, context):
+    buttons = [[InlineKeyboardButton(str(n), callback_data=f"words_count_{n}")] for n in [1, 2, 3, 5]]
+    await context.bot.send_message(chat_id=user_id, text="Сколько слов за раз?", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def ask_category(user_id, context):
+    buttons = [[InlineKeyboardButton(cat, callback_data=f"category_{cat}")] for cat in CATEGORIES]
+    await context.bot.send_message(chat_id=user_id, text="Откуда брать фразы?", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def ask_translate_phrases(user_id, context):
+    buttons = [
+        [InlineKeyboardButton("Да", callback_data="translate_phrases_yes")],
+        [InlineKeyboardButton("Нет", callback_data="translate_phrases_no")]
+    ]
+    await context.bot.send_message(chat_id=user_id, text="Нужен ли перевод фраз?", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def complete_setup(user_id, context):
+    await context.bot.send_message(chat_id=user_id, text="🎉 Ура, мы всё настроили!\nЕсли захочешь что-то изменить — просто напиши /menu")
+
+# Обработка кнопок
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+
+    if user_id not in user_settings:
+        user_settings[user_id] = {}
+
+    data = query.data
+
+    if data.startswith("translate_words_"):
+        user_settings[user_id]["translate_words"] = data.endswith("yes")
+        await ask_times_per_day(user_id, context)
+
+    elif data.startswith("times_per_day_"):
+        times = int(data.split("_")[-1])
+        user_settings[user_id]["times_per_day"] = times
+        await ask_words_count(user_id, context)
+
+    elif data.startswith("words_count_"):
+        count = int(data.split("_")[-1])
+        user_settings[user_id]["words_count"] = count
+        await ask_category(user_id, context)
+
+    elif data.startswith("category_"):
+        cat = data.split("_", 1)[-1]
+        user_settings[user_id]["category"] = cat
+        await ask_translate_phrases(user_id, context)
+
+    elif data.startswith("translate_phrases_"):
+        user_settings[user_id]["translate_phrases"] = data.endswith("yes")
+        save_json(SETTINGS_FILE, user_settings)
+        schedule_user_reminders(user_id, context)
+        await complete_setup(user_id, context)
+
+# Перевод слова
+def translate_word(word):
+    try:
+        res = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": f"Переведи слово '{word}' на русский одним словом."}],
+            max_tokens=20
+        )
+        return res.choices[0].message["content"].strip()
+    except Exception:
+        return "ошибка перевода"
+
+# Получение фразы
+def generate_example(word, category, translate):
+    prompt = f"""Придумай короткую фразу (на английском) со словом "{word}" в контексте категории "{category}". 
+Укажи источник (конкретное название песни, фильма и т.д.), и переведи фразу на русский, если требуется."""
+    try:
+        res = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150
+        )
+        return res.choices[0].message["content"].strip()
+    except Exception:
+        return "⚠️ Ошибка генерации примера."
+
+# Обработка слов
+async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    word = update.message.text.strip()
+
+    if user_id not in user_settings:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Напиши /start или /menu для настройки 😊")
+        return
+
+    translate = translate_word(word) if user_settings[user_id].get("translate_words") else "без перевода"
+    if user_id not in user_words:
+        user_words[user_id] = []
+
+    user_words[user_id].append(word)
+    save_json(WORDS_FILE, user_words)
+
+    msg = f"Слово '{word}' (перевод: {translate}) – добавлено в базу ✅"
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+
+    category = user_settings[user_id].get("category", "Любая тема")
+    need_translation = user_settings[user_id].get("translate_phrases", True)
+    example = generate_example(word, category, need_translation)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"📘 Пример:\n{example}")
+
+# Удаление слова
+async def delete_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    word = update.message.text.replace("/delete ", "").strip().lower()
+    if word in user_words.get(user_id, []):
+        user_words[user_id].remove(word)
+        save_json(WORDS_FILE, user_words)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Слово '{word}' удалено из базы ❌")
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Слово '{word}' не найдено в базе")
+
+# Рассылка
+async def send_reminders():
+    now = datetime.datetime.now().hour
+    for user_id, settings in user_settings.items():
+        times = REMINDER_TIMES.get(settings.get("times_per_day", 1), [11])
+        if now in times:
+            count = settings.get("words_count", 1)
+            words = random.sample(user_words.get(user_id, []), min(count, len(user_words.get(user_id, []))))
+            for word in words:
+                translate = translate_word(word) if settings.get("translate_words") else "без перевода"
+                msg = f"🧠 Слово дня: '{word}' (перевод: {translate})"
+                await send_message(int(user_id), msg, context=None)
+                example = generate_example(word, settings.get("category", "Любая тема"), settings.get("translate_phrases", True))
+                await send_message(int(user_id), f"📘 Пример:\n{example}", context=None)
+
+async def send_message(user_id, text, context):
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    await app.bot.send_message(chat_id=user_id, text=text)
+
+def schedule_user_reminders(user_id, context):
+    for h in [11, 15, 19]:
+        scheduler.add_job(send_reminders, CronTrigger(hour=h, minute=0))
+
+# Запуск
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("delete", delete_word))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_word))
+    scheduler.add_job(send_reminders, CronTrigger(minute=0))
     app.run_polling()
