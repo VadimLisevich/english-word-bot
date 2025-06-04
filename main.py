@@ -2,214 +2,244 @@ import os
 import json
 import logging
 import random
-import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, CallbackQueryHandler
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from openai import OpenAI, OpenAIError
+from openai import OpenAI
 
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---------------- LOGGING ----------------
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO
-)
-
-# ---------------- DATA ----------------
+# Файлы
 SETTINGS_FILE = "user_settings.json"
 WORDS_FILE = "user_words.json"
+PHRASES_FILE = "phrases.json"
 
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            return json.load(f)
-    return {}
+# Настройки логгера
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# Тематики
+CATEGORIES = {
+    "афоризм": "Афоризм",
+    "цитата": "Цитата",
+    "кино": "Кино",
+    "Песни": "Песни",
+    "любая тема": "Любая тема"
+}
 
-user_settings = load_json(SETTINGS_FILE)
-user_words = load_json(WORDS_FILE)
+# Загрузка данных
+def load_json(filename):
+    if not os.path.exists(filename):
+        return {}
+    with open(filename, "r") as f:
+        return json.load(f)
 
-# ---------------- НАСТРОЙКА ----------------
-DEFAULT_STATE = "start"
-SETUP_ORDER = [
-    "translate_word", "message_freq", "words_per_batch", "phrase_source", "translate_phrase"
-]
 
-def get_next_setting(user_id):
-    user_data = user_settings.get(str(user_id), {})
-    for key in SETUP_ORDER:
-        if key not in user_data:
-            return key
-    return None
+def save_json(filename, data):
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=2)
 
-async def start_setup(user_id, context: ContextTypes.DEFAULT_TYPE, greet=True):
-    user_settings[str(user_id)] = {"state": DEFAULT_STATE}
-    save_json(SETTINGS_FILE, user_settings)
-    if greet:
-        await context.bot.send_message(chat_id=user_id, text=(
-            "👋 Привет! Этот бот помогает учить английские слова через фразы.\n"
-            "Просто присылай сюда слова, которые тебе сложно запомнить, и я буду слать примеры фраз в течение дня.\n\n"
-            "Окей, давай настроим бота!"
-        ))
-    await ask_next_question(user_id, context)
 
-async def ask_next_question(user_id, context):
-    user_data = user_settings.get(str(user_id), {})
-    current_setting = get_next_setting(user_id)
+# Стартовая настройка
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    context.user_data["settings_step"] = 0
+    settings = load_json(SETTINGS_FILE)
+    settings[user_id] = {}
+    save_json(SETTINGS_FILE, settings)
+    await update.message.reply_text(
+        "Привет! Этот бот помогает учить английские слова через фразы. "
+        "Тебе нужно просто писать сюда слова, которые ты никак не можешь запомнить, "
+        "а я буду тебе в течение дня давать примеры фраз с использованием этих слов.\n\n"
+        "Окей, давай настроим бота!"
+    )
+    await ask_translate_words(update)
 
-    if not current_setting:
-        user_data["state"] = "active"
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="🎉 Ура, мы всё настроили!\nЕсли захочешь что-то изменить — просто напиши /menu"
-        )
-        save_json(SETTINGS_FILE, user_settings)
-        return
 
-    user_data["state"] = current_setting
-    save_json(SETTINGS_FILE, user_settings)
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    context.user_data["settings_step"] = 0
+    settings = load_json(SETTINGS_FILE)
+    settings[user_id] = {}
+    save_json(SETTINGS_FILE, settings)
+    await ask_translate_words(update)
 
-    keyboard = {
-        "translate_word": ["Без перевода", "Нужен перевод"],
-        "message_freq": ["1", "2", "3"],
-        "words_per_batch": ["1", "2", "3", "5"],
-        "phrase_source": ["Афоризм", "Цитата", "Кино", "Песня", "Любая тема"],
-        "translate_phrase": ["Да", "Нет"]
-    }
 
-    messages = {
-        "translate_word": "Нужен ли тебе перевод слова?",
-        "message_freq": "Как часто ты хочешь получать сообщения в день?",
-        "words_per_batch": "Сколько слов повторять за один раз?",
-        "phrase_source": "Откуда лучше брать примеры фраз?",
-        "translate_phrase": "Нужен ли перевод для фраз?"
-    }
-
-    buttons = [
-        [InlineKeyboardButton(text, callback_data=text)] for text in keyboard[current_setting]
+# Шаг 1
+async def ask_translate_words(update: Update):
+    keyboard = [
+        [InlineKeyboardButton("Без перевода", callback_data="translate_words_no")],
+        [InlineKeyboardButton("Нужен перевод", callback_data="translate_words_yes")],
     ]
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await context.bot.send_message(chat_id=user_id, text=messages[current_setting], reply_markup=reply_markup)
+    await update.message.reply_text("Нужен ли тебе перевод слова или просто хочешь добавлять его в базу?",
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ---------------- CALLBACK ----------------
+
+# Шаг 2–6
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     query = update.callback_query
     await query.answer()
+    user_id = str(query.from_user.id)
 
-    state = user_settings.get(str(user_id), {}).get("state")
-    if not state or state == "active":
-        return
+    settings = load_json(SETTINGS_FILE)
 
-    value = query.data
-    if state == "translate_word":
-        user_settings[str(user_id)]["translate_word"] = (value == "Нужен перевод")
-    elif state == "message_freq":
-        user_settings[str(user_id)]["message_freq"] = int(value)
-    elif state == "words_per_batch":
-        user_settings[str(user_id)]["words_per_batch"] = int(value)
-    elif state == "phrase_source":
-        user_settings[str(user_id)]["phrase_source"] = value
-    elif state == "translate_phrase":
-        user_settings[str(user_id)]["translate_phrase"] = (value == "Да")
+    data = query.data
 
-    save_json(SETTINGS_FILE, user_settings)
-    await ask_next_question(user_id, context)
+    if data.startswith("translate_words_"):
+        settings[user_id]["translate_words"] = data.endswith("yes")
+        await query.message.reply_text("Как часто ты хочешь, чтобы я писал тебе?",
+                                       reply_markup=InlineKeyboardMarkup([
+                                           [InlineKeyboardButton("1", callback_data="frequency_1")],
+                                           [InlineKeyboardButton("2", callback_data="frequency_2")],
+                                           [InlineKeyboardButton("3", callback_data="frequency_3")]
+                                       ]))
 
-# ---------------- ПЕРЕВОД + ПРИМЕР ----------------
-async def get_translation_and_example(word, source, translate_phrase=True):
-    prompt = (
-        f"Give a short example sentence using the word '{word}' in a natural context. "
-        f"Source: {source}. Then write the source (e.g., movie or song)."
-    )
-    if translate_phrase:
-        prompt += " Translate the sentence into Russian."
+    elif data.startswith("frequency_"):
+        settings[user_id]["frequency"] = int(data.split("_")[1])
+        await query.message.reply_text("Отлично! А сколько слов за один раз ты хочешь повторять?",
+                                       reply_markup=InlineKeyboardMarkup([
+                                           [InlineKeyboardButton("1", callback_data="count_1")],
+                                           [InlineKeyboardButton("2", callback_data="count_2")],
+                                           [InlineKeyboardButton("3", callback_data="count_3")],
+                                           [InlineKeyboardButton("5", callback_data="count_5")]
+                                       ]))
 
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
+    elif data.startswith("count_"):
+        settings[user_id]["count"] = int(data.split("_")[1])
+        await query.message.reply_text("Окей, а откуда лучше брать примеры фраз?",
+                                       reply_markup=InlineKeyboardMarkup([
+                                           [InlineKeyboardButton("Афоризм", callback_data="source_афоризм")],
+                                           [InlineKeyboardButton("Цитата", callback_data="source_цитата")],
+                                           [InlineKeyboardButton("Кино", callback_data="source_кино")],
+                                           [InlineKeyboardButton("Песни", callback_data="source_Песни")],
+                                           [InlineKeyboardButton("Любая тема", callback_data="source_любая тема")]
+                                       ]))
+
+    elif data.startswith("source_"):
+        settings[user_id]["source"] = data.split("_")[1]
+        await query.message.reply_text("Перевод для фраз нужен?",
+                                       reply_markup=InlineKeyboardMarkup([
+                                           [InlineKeyboardButton("Да", callback_data="translate_phrase_yes")],
+                                           [InlineKeyboardButton("Нет", callback_data="translate_phrase_no")]
+                                       ]))
+
+    elif data.startswith("translate_phrase_"):
+        settings[user_id]["translate_phrase"] = data.endswith("yes")
+        save_json(SETTINGS_FILE, settings)
+        await query.message.reply_text(
+            "🎉 Ура, мы всё настроили!\nЕсли захочешь что-то изменить — просто напиши /menu"
         )
-        return completion.choices[0].message.content
-    except OpenAIError as e:
-        logging.error(f"OpenAI error: {e}")
-        return None
 
-# ---------------- ОБРАБОТКА СООБЩЕНИЙ ----------------
+    save_json(SETTINGS_FILE, settings)
+
+
+# Обработка слов
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
+    user_id = str(update.effective_user.id)
+    settings = load_json(SETTINGS_FILE)
+    words = load_json(WORDS_FILE)
 
-    if text.startswith("/delete "):
-        word = text.replace("/delete", "").strip().lower()
-        words = user_words.get(str(user_id), [])
-        if word in words:
-            words.remove(word)
-            user_words[str(user_id)] = words
-            save_json(WORDS_FILE, user_words)
-            await update.message.reply_text(f"❌ Слово '{word}' удалено из базы.")
-        else:
-            await update.message.reply_text("Слово не найдено.")
-        return
-
-    state = user_settings.get(str(user_id), {}).get("state")
-    if state != "active":
+    if user_id not in settings or "translate_words" not in settings[user_id]:
         await update.message.reply_text("Напиши /start или /menu для настройки 😊")
         return
 
-    user_words.setdefault(str(user_id), []).append(text.lower())
-    save_json(WORDS_FILE, user_words)
+    text = update.message.text.strip().lower()
 
-    if user_settings[str(user_id)].get("translate_word", False):
-        example = await get_translation_and_example(
-            text, user_settings[str(user_id)]["phrase_source"],
-            translate_phrase=user_settings[str(user_id)].get("translate_phrase", True)
-        )
-        if example:
-            await update.message.reply_text(f"Слово '{text}' добавлено в базу ✅\n\n📘 Пример:\n{example}")
+    if text.startswith("/delete "):
+        word_to_delete = text[8:].strip().lower()
+        if user_id in words and word_to_delete in words[user_id]:
+            words[user_id].remove(word_to_delete)
+            save_json(WORDS_FILE, words)
+            await update.message.reply_text(f"Слово '{word_to_delete}' удалено из базы 🗑️")
         else:
-            await update.message.reply_text(f"Слово '{text}' добавлено, но перевод не получен 😕")
+            await update.message.reply_text(f"Слово '{word_to_delete}' не найдено в базе.")
+        return
+
+    words.setdefault(user_id, [])
+    if text not in words[user_id]:
+        words[user_id].append(text)
+        save_json(WORDS_FILE, words)
+
+        if settings[user_id].get("translate_words"):
+            try:
+                translation = get_translation(text)
+                await update.message.reply_text(f"Слово '{text}' (перевод: {translation}) – добавлено в базу ✅")
+            except Exception:
+                await update.message.reply_text(f"Слово '{text}' добавлено в базу ✅ (перевод не получен)")
+        else:
+            await update.message.reply_text(f"Слово '{text}' добавлено в базу ✅")
     else:
-        await update.message.reply_text(f"Слово '{text}' добавлено в базу ✅")
+        await update.message.reply_text(f"Слово '{text}' уже в базе 👌")
 
-# ---------------- АВТОРАССЫЛКА ----------------
-async def send_daily_messages(app):
-    for user_id, settings in user_settings.items():
-        if settings.get("state") != "active":
+
+# Получение перевода
+def get_translation(word):
+    response = openai.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{
+            "role": "user",
+            "content": f"Переведи слово '{word}' на русский одним словом."
+        }],
+        temperature=0.5,
+    )
+    return response.choices[0].message.content.strip()
+
+
+# Фразы
+def load_phrases_by_category(category):
+    phrases = load_json(PHRASES_FILE)
+    if category == "любая тема":
+        all_phrases = []
+        for cat_phrases in phrases.values():
+            all_phrases.extend(cat_phrases)
+        return all_phrases
+    return phrases.get(category, [])
+
+
+# Авторассылка
+async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
+    settings = load_json(SETTINGS_FILE)
+    words = load_json(WORDS_FILE)
+
+    for user_id, config in settings.items():
+        user_words = words.get(user_id, [])
+        if not user_words:
             continue
-        words = user_words.get(str(user_id), [])[:settings.get("words_per_batch", 1)]
-        for word in words:
-            example = await get_translation_and_example(
-                word,
-                settings.get("phrase_source", "Любая тема"),
-                translate_phrase=settings.get("translate_phrase", True)
-            )
-            if example:
+
+        count = config.get("count", 1)
+        selected_words = random.sample(user_words, min(count, len(user_words)))
+        source = config.get("source", "любая тема")
+        phrases = load_phrases_by_category(source)
+        random.shuffle(phrases)
+
+        for word in selected_words:
+            phrase_obj = next((p for p in phrases if word.lower() in p["text"].lower()), None)
+            if phrase_obj:
+                reply = f"📘 Пример:\n\"{phrase_obj['text']}\" Source: {CATEGORIES.get(source, 'Фраза')}.\n"
+                if config.get("translate_phrase") and "translation" in phrase_obj:
+                    reply += f"\n\"{phrase_obj['translation']}\" Источник: {CATEGORIES.get(source, 'Фраза')}."
                 try:
-                    await app.bot.send_message(chat_id=int(user_id), text=f"📚 {word}\n\n{example}")
-                except:
-                    pass
+                    await context.bot.send_message(chat_id=int(user_id), text=reply)
+                except Exception as e:
+                    logging.error(f"❌ Не удалось отправить сообщение {user_id}: {e}")
 
-# ---------------- START / MENU ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_setup(update.effective_user.id, context, greet=True)
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start_setup(update.effective_user.id, context, greet=False)
-
-# ---------------- MAIN ----------------
+# Запуск
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -218,7 +248,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_daily_messages, "interval", hours=6, args=[app])
+    scheduler.add_job(send_reminders, "interval", hours=8)
     scheduler.start()
 
     logging.info("🚀 Бот запущен")
