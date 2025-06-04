@@ -1,103 +1,156 @@
 import os
 import json
 import logging
+import random
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from openai import OpenAI
-from openai.types.chat import ChatCompletion
-
-# Настройка логов
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Переменные окружения
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
-DATA_FILE = "words.json"
+SETTINGS_FILE = "user_settings.json"
+WORDS_FILE = "words.json"
+SEND_TIMES = {1: [11], 2: [11, 15], 3: [11, 15, 19]}
 
-if not BOT_TOKEN or not OPENAI_KEY:
-    logging.error("❌ ОШИБКА: Переменные окружения TELEGRAM_BOT_TOKEN и OPENAI_API_KEY обязательны.")
-    exit(1)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-# Загрузка и сохранение слов пользователя
-def load_words():
-    if not os.path.exists(DATA_FILE):
+# ==== Служебные функции ====
+def load_json(filename):
+    if not os.path.exists(filename):
         return {}
-    try:
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.error(f"Ошибка при чтении файла базы: {e}")
-        return {}
+    with open(filename, "r") as f:
+        return json.load(f)
 
-def save_words(data):
-    try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logging.error(f"Ошибка при сохранении файла базы: {e}")
+def save_json(filename, data):
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=2)
 
-# Получить перевод и пример с OpenAI
-async def get_translation_and_example(word: str) -> str:
-    logging.info(f"📨 Отправка запроса в OpenAI для слова: {word}")
-    prompt = f"""Ты — учитель английского. Дай краткий перевод слова "{word}" и один интересный пример его использования в фразе (можно из фильма, песни, пословицы и т.д.). Формат:
-Перевод: ...
-Фраза: ..."""
-
-    try:
-        client = OpenAI(api_key=OPENAI_KEY)
-        response: ChatCompletion = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100
-        )
-        result = response.choices[0].message.content.strip()
-        logging.info(f"✅ Ответ OpenAI получен: {result}")
-        return result
-    except Exception as e:
-        logging.error(f"❌ Ошибка в OpenAI API: {e}")
-        raise e
-
-# Команда /start
+# ==== Настройки ====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"👤 Новый пользователь: {update.effective_user.id}")
-    await update.message.reply_text(
-        "👋 Привет! Просто пришли мне слово на английском — я дам перевод и пример фразы ✍️"
-    )
-
-# Обработка сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    word = update.message.text.strip().lower()
     user_id = str(update.effective_user.id)
-    logging.info(f"📩 Пользователь {user_id} отправил слово: {word}")
+    context.user_data["settings_mode"] = True
+    context.user_data["step"] = "translate_word"
+    await update.message.reply_text(
+        "👋 Привет! Этот бот помогает учить английские слова через фразы.\n\n"
+        "Тебе нужно просто писать сюда слова, которые ты никак не можешь запомнить, "
+        "а я буду тебе в течение дня давать примеры фраз с использованием этих слов.\n\n"
+        "Окей, давай настроим бота!"
+    )
+    await ask_translate_word(update, context)
 
-    data = load_words()
-    if user_id not in data:
-        data[user_id] = []
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["settings_mode"] = True
+    context.user_data["step"] = "translate_word"
+    await update.message.reply_text("🛠 Давай снова настроим бота!")
+    await ask_translate_word(update, context)
 
-    if word in data[user_id]:
-        logging.info(f"🔁 Слово уже есть в базе у пользователя {user_id}")
-        await update.message.reply_text("Это слово уже есть в твоей базе знаний ✍️")
-        return
+# ==== Вопросы ====
+async def ask_translate_word(update, context):
+    kb = [[InlineKeyboardButton("🔕 Без перевода", callback_data="translate_word:no")],
+          [InlineKeyboardButton("🔤 Нужен перевод", callback_data="translate_word:yes")]]
+    await update.message.reply_text("Нужен ли тебе перевод слова или ты просто хочешь добавлять его в базу?",
+                                    reply_markup=InlineKeyboardMarkup(kb))
 
-    await update.message.reply_text("⏳ Думаю...")
+async def ask_frequency(update, context):
+    kb = [[InlineKeyboardButton(str(i), callback_data=f"frequency:{i}")] for i in [1, 2, 3]]
+    await update.callback_query.message.reply_text("Как часто ты хочешь, чтобы я писал тебе?",
+                                                   reply_markup=InlineKeyboardMarkup(kb))
 
-    try:
-        result = await get_translation_and_example(word)
-        data[user_id].append(word)
-        save_words(data)
-        await update.message.reply_text(f"✅ Добавлено!\n\n{result}")
-    except Exception as e:
-        await update.message.reply_text("⚠️ Произошла ошибка. Проверь API-ключ или повтори позже.")
-        logging.exception("‼️ Сбой при обработке слова")
+async def ask_batch_size(update, context):
+    kb = [[InlineKeyboardButton(str(i), callback_data=f"batch:{i}")] for i in [1, 2, 3, 5]]
+    await update.callback_query.message.reply_text("Сколько слов за один раз ты хочешь повторять?",
+                                                   reply_markup=InlineKeyboardMarkup(kb))
 
-# Фейковый HTTP-сервер для Render
+async def ask_source_type(update, context):
+    types = ["aphorism", "quote", "movie", "song", "any"]
+    names = ["🧠 Афоризм", "📖 Цитата", "🎬 Кино", "🎵 Песни", "🌍 Любая тема"]
+    kb = [[InlineKeyboardButton(names[i], callback_data=f"source:{types[i]}")] for i in range(5)]
+    await update.callback_query.message.reply_text("Окей, а откуда лучше брать примеры фраз?",
+                                                   reply_markup=InlineKeyboardMarkup(kb))
+
+async def ask_phrase_translation(update, context):
+    kb = [[InlineKeyboardButton("Да", callback_data="phrase_translate:yes")],
+          [InlineKeyboardButton("Нет", callback_data="phrase_translate:no")]]
+    await update.callback_query.message.reply_text("Перевод для фраз нужен?",
+                                                   reply_markup=InlineKeyboardMarkup(kb))
+
+# ==== Callback ====
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = str(query.from_user.id)
+    settings = load_json(SETTINGS_FILE)
+    if user_id not in settings:
+        settings[user_id] = {}
+
+    key, value = query.data.split(":")
+
+    if key == "translate_word":
+        settings[user_id]["translate_word"] = value == "yes"
+        await ask_frequency(update, context)
+
+    elif key == "frequency":
+        settings[user_id]["frequency"] = int(value)
+        await ask_batch_size(update, context)
+
+    elif key == "batch":
+        settings[user_id]["batch_size"] = int(value)
+        await ask_source_type(update, context)
+
+    elif key == "source":
+        settings[user_id]["source_type"] = value
+        await ask_phrase_translation(update, context)
+
+    elif key == "phrase_translate":
+        settings[user_id]["translate_phrase"] = value == "yes"
+        await query.message.reply_text("🎉 Ура, мы всё настроили!\nЕсли захочешь что-то изменить — просто напиши /menu")
+
+    save_json(SETTINGS_FILE, settings)
+
+# ==== Генератор фраз ====
+def generate_phrase(word, source_type, translate):
+    source_map = {
+        "aphorism": "афоризм",
+        "quote": "цитата",
+        "movie": "фильм ‘Inception’",
+        "song": "песня ‘Imagine’",
+        "any": random.choice(["афоризм", "фильм ‘Matrix’", "цитата из книги"])
+    }
+    phrase = f"This is an example phrase with the word '{word}'."
+    translation = f"Это пример фразы со словом '{word}'."
+    source = source_map.get(source_type, "неизвестный источник")
+    return f"🧠 Слово: {word}\n💬 Фраза: {phrase}" + (f"\n🔁 Перевод: {translation}" if translate else "") + f"\n📍Источник: {source}"
+
+# ==== Планировщик ====
+def send_scheduled_messages(app):
+    now = datetime.now()
+    settings = load_json(SETTINGS_FILE)
+    words = load_json(WORDS_FILE)
+
+    for user_id, cfg in settings.items():
+        times = SEND_TIMES.get(cfg.get("frequency", 1), [11])
+        if now.hour not in times:
+            continue
+        batch_size = cfg.get("batch_size", 1)
+        word_list = words.get(user_id, [])
+        if not word_list:
+            continue
+        selected = random.sample(word_list, min(len(word_list), batch_size))
+        for word in selected:
+            text = generate_phrase(word, cfg.get("source_type", "any"), cfg.get("translate_phrase", False))
+            try:
+                app.bot.send_message(chat_id=int(user_id), text=text)
+            except Exception as e:
+                logging.error(f"❌ Не удалось отправить сообщение {user_id}: {e}")
+
+# ==== Fake HTTP для Render ====
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -106,19 +159,23 @@ class PingHandler(BaseHTTPRequestHandler):
 
 def run_fake_server():
     port = int(os.environ.get("PORT", 10000))
-    logging.info(f"🌐 Запуск фейкового HTTP-сервера на порту {port}")
     server = HTTPServer(("", port), PingHandler)
     server.serve_forever()
 
-# Основной запуск
+# ==== Запуск ====
 if __name__ == "__main__":
-    logging.info("🚀 Запуск Telegram-бота")
-
-    # Фейковый HTTP-сервер в отдельном потоке (нужен Render'у)
     threading.Thread(target=run_fake_server).start()
-
-    # Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,
+                                   lambda u, c: u.message.reply_text("Напиши /start или /menu для настройки 😊")))
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(send_scheduled_messages, "cron", minute="0", args=[app])  # каждые полные часы
+    scheduler.start()
+
+    logging.info("🤖 Бот с авторассылкой запущен!")
     app.run_polling()
