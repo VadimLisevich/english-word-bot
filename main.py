@@ -1,6 +1,9 @@
+# Файл main.py
 import logging
 import random
 import asyncio
+import os
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -8,37 +11,28 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from dotenv import load_dotenv
-import os
 import openai
 
-# Загрузка переменных окружения
+# === Настройки и переменные окружения ===
 load_dotenv('.env.example')
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
 
-# Настройка логирования
 logging.basicConfig(format='%(asctime)s | %(levelname)s | %(message)s', level=logging.INFO)
 
-# Память пользователей
 user_settings = {}
 user_words = {}
-
-# Создание планировщика
-scheduler = AsyncIOScheduler()
-
-# Категории фраз
 CATEGORIES = ['Афоризмы', 'Цитаты', 'Кино', 'Песни', 'Любая тема']
 
+scheduler = AsyncIOScheduler()
+
+# === AI функции ===
 async def translate_word(word: str) -> str:
     try:
         response = await openai.ChatCompletion.acreate(
             model="gpt-4",
-            messages=[{
-                "role": "user",
-                "content": f"Переведи слово '{word}' с английского на русский одним словом."
-            }]
+            messages=[{"role": "user", "content": f"Переведи слово '{word}' с английского на русский одним словом."}]
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -53,14 +47,12 @@ async def generate_example(word: str, category: str) -> tuple[str, str, str]:
             messages=[{"role": "user", "content": prompt}]
         )
         parts = response.choices[0].message.content.strip().split('\n')
-        english, source, translation = parts[0], parts[1], parts[2]
-        return english.strip(), source.strip(), translation.strip()
+        return parts[0], parts[1], parts[2]
     except Exception as e:
         logging.error(f"Error generating example for word '{word}': {e}")
         return "⚠️ Ошибка генерации примера.", "", ""
 
-# === Команды ===
-
+# === Начальная настройка ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_settings[user_id] = {}
@@ -71,17 +63,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_settings[user_id] = {}
     await ask_translate_words(update)
 
-# === Вопросы по настройке ===
-
 async def ask_translate_words(update: Update):
     keyboard = [[InlineKeyboardButton("Да", callback_data='translate_words_yes'),
                  InlineKeyboardButton("Нет", callback_data='translate_words_no')]]
     await update.message.reply_text("Нужен перевод слов?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def ask_frequency(context, user_id):
-    keyboard = [[InlineKeyboardButton("1", callback_data='frequency_1'),
-                 InlineKeyboardButton("2", callback_data='frequency_2'),
-                 InlineKeyboardButton("3", callback_data='frequency_3')]]
+    keyboard = [[InlineKeyboardButton(str(i), callback_data=f'frequency_{i}')] for i in [1, 2, 3]]
     await context.bot.send_message(chat_id=user_id, text="Как часто ты хочешь, чтобы я писал тебе?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def ask_words_per_message(context, user_id):
@@ -98,7 +86,6 @@ async def ask_translate_phrases(context, user_id):
     await context.bot.send_message(chat_id=user_id, text="Нужен ли перевод фраз?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # === Обработка кнопок ===
-
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -122,8 +109,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="Настройка завершена ✅\n\nЕсли хочешь изменить — напиши /menu")
         schedule_user_reminders(user_id, context)
 
-# === Обработка новых слов ===
-
+# === Работа со словами ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     word = update.message.text.strip().lower()
@@ -141,19 +127,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = f"Слово '{word}' (перевод: {translate}) – добавлено в базу ✅\n\n📘 Пример:\n{eng_phrase}\n{ru_phrase} Источник: {source}."
     await update.message.reply_text(response)
 
-# === Планировщик ===
-
+# === Напоминания ===
 def schedule_user_reminders(user_id, context):
     scheduler.remove_all_jobs(jobstore=None)
+    times = {
+        1: ["11:00"],
+        2: ["11:00", "15:00"],
+        3: ["11:00", "15:00", "19:00"]
+    }.get(user_settings[user_id]["frequency"], ["11:00"])
 
-    times = []
-    match user_settings[user_id]["frequency"]:
-        case 1: times = ["11:00"]
-        case 2: times = ["11:00", "15:00"]
-        case 3: times = ["11:00", "15:00", "19:00"]
-
-    for time in times:
-        hour, minute = map(int, time.split(":"))
+    for t in times:
+        hour, minute = map(int, t.split(":"))
         scheduler.add_job(
             send_reminders,
             trigger=CronTrigger(hour=hour, minute=minute),
@@ -176,9 +160,8 @@ async def send_reminders(context, user_id):
         text = f"🕒 Напоминание!\n\nСлово: {word}\nПеревод: {translate}\n\n📘 Пример:\n{eng_phrase}\n{ru_phrase} Источник: {source}"
         await context.bot.send_message(chat_id=user_id, text=text)
 
-# === Главный запуск ===
-
-async def main():
+# === Запуск приложения ===
+async def run_bot():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -187,7 +170,10 @@ async def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     scheduler.start()
+    logging.info("Scheduler started")
+
     await app.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.get_event_loop().create_task(run_bot())
+    asyncio.get_event_loop().run_forever()
