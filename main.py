@@ -1,6 +1,7 @@
 import os
 import logging
 import random
+import asyncio
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,7 +28,9 @@ logging.basicConfig(
 user_data = {}
 word_database = {}
 
-scheduler = AsyncIOScheduler()
+# Создаем event loop вручную
+loop = asyncio.get_event_loop()
+scheduler = AsyncIOScheduler(event_loop=loop)
 
 def translate_word(word: str) -> str:
     try:
@@ -148,8 +151,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = data.split("_")[1]
         user_data[user_id]["category"] = category
         await context.bot.send_message(chat_id=user_id, text="Настройка завершена. Можешь прислать слово.")
-
-        # Запустить рассылку
         schedule_reminders(user_id)
 
 application = ApplicationBuilder().token(BOT_TOKEN).build()
