@@ -226,5 +226,10 @@ application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_word))
 
 if __name__ == "__main__":
-    scheduler.start()
-    application.run_polling()
+    import asyncio
+
+    async def main():
+        scheduler.start()
+        await application.run_polling()
+
+    asyncio.run(main())
