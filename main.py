@@ -160,11 +160,8 @@ async def send_reminders(context, user_id):
         text = f"🕒 Напоминание!\n\nСлово: {word}\nПеревод: {translate}\n\n📘 Пример:\n{eng_phrase}\n{ru_phrase} Источник: {source}"
         await context.bot.send_message(chat_id=user_id, text=text)
 
-# === Запуск приложения ===
-if __name__ == '__main__':
-    scheduler.start()
-    logging.info("Scheduler started")
-
+# === Основной запуск ===
+async def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -172,4 +169,10 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.run_polling()
+    scheduler.start()
+    logging.info("Scheduler started")
+
+    await app.run_polling()
+
+if __name__ == '__main__':
+    asyncio.run(main())
