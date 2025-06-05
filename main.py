@@ -1,7 +1,6 @@
-# Файл main.py
+# main.py
 import logging
 import random
-import asyncio
 import os
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,6 +11,7 @@ from telegram.ext import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import openai
+import asyncio
 
 # === Настройки и переменные окружения ===
 load_dotenv('.env.example')
@@ -52,7 +52,7 @@ async def generate_example(word: str, category: str) -> tuple[str, str, str]:
         logging.error(f"Error generating example for word '{word}': {e}")
         return "⚠️ Ошибка генерации примера.", "", ""
 
-# === Начальная настройка ===
+# === Настройка ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_settings[user_id] = {}
@@ -109,7 +109,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=user_id, text="Настройка завершена ✅\n\nЕсли хочешь изменить — напиши /menu")
         schedule_user_reminders(user_id, context)
 
-# === Работа со словами ===
+# === Обработка слов ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     word = update.message.text.strip().lower()
@@ -161,7 +161,10 @@ async def send_reminders(context, user_id):
         await context.bot.send_message(chat_id=user_id, text=text)
 
 # === Запуск приложения ===
-async def run_bot():
+if __name__ == '__main__':
+    scheduler.start()
+    logging.info("Scheduler started")
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -169,11 +172,4 @@ async def run_bot():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    scheduler.start()
-    logging.info("Scheduler started")
-
-    await app.run_polling()
-
-if __name__ == '__main__':
-    asyncio.get_event_loop().create_task(run_bot())
-    asyncio.get_event_loop().run_forever()
+    app.run_polling()
