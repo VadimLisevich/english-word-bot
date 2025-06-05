@@ -1,4 +1,6 @@
 python-telegram-bot==20.6
-openai>=1.0.0
+openai==1.30.1
 python-dotenv
-apscheduler
+APScheduler==3.10.4
+nest_asyncio
+pytz
