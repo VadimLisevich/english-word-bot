@@ -9,11 +9,10 @@ from uuid import uuid4
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
-    CallbackContext,
-    CommandHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
+    MessageHandler,
     filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -37,7 +36,7 @@ user_words = {}
 
 scheduler = AsyncIOScheduler()
 
-async def start(update: Update, context: CallbackContext.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_settings[user_id] = {
         "translate_words": None,
@@ -116,7 +115,7 @@ def schedule_user_reminders(user_id):
             jobstore=str(user_id)
         )
 
-async def callback_handler(update: Update, context: CallbackContext.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = update.callback_query.data
     await update.callback_query.answer()
@@ -181,7 +180,7 @@ async def generate_example(word: str, category: str) -> tuple[str, str, str]:
         logger.error(f"Error generating example for word '{word}': {e}")
         return None, None, None
 
-async def message_handler(update: Update, context: CallbackContext.DEFAULT_TYPE):
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     word = update.message.text.strip().lower()
 
@@ -227,7 +226,8 @@ async def send_reminders(user_id):
             text += f"📘 Пример:\n\"{en}\"\n\"{ru}\"\nИсточник: {source}"
         else:
             text += "📘 Пример:\n⚠️ Ошибка генерации примера."
-        await context.bot.send_message(chat_id=user_id, text=text)
+        application = context.bot.application
+        await application.bot.send_message(chat_id=user_id, text=text)
 
 if __name__ == "__main__":
     async def main():
