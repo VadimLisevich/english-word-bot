@@ -1,62 +1,71 @@
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
 import random
 
-def get_translation(word: str) -> str:
-    # Простейший пример перевода, можно подключить API или словарь
-    dictionary = {
-        "execute": "выполнять",
-        "plan": "план",
-        "perfectly": "идеально",
-        "always": "всегда",
-        "intersect": "пересекаться",
-        "conducts": "проводит",
-    }
-    return dictionary.get(word.lower(), "перевод не найден")
+# Временная база
+user_words = {}         # user_id: [word1, word2, ...]
+user_settings = {}      # user_id: {'translate_phrase': True}
 
-def get_example_phrase(word: str, category: str):
-    # Заглушки с фразами по категориям — можно расширить
-    phrases = {
-        "Кино": [
-            ("I'm executing the plan perfectly, just like always.", "Inception"),
-            ("He intersects paths with destiny.", "The Matrix"),
-            ("She conducts herself with grace.", "Pride & Prejudice"),
-        ],
-        "Песни": [
-            ("We intersect in the middle of the night.", "Song: Midnight Roads"),
-            ("She conducts the music of my heart.", "Song: Symphony Soul"),
-        ],
-        "Афоризмы": [
-            ("To execute a dream, start with action.", "Aphorism"),
-            ("Those who conduct well, live well.", "Aphorism"),
-        ],
-        "Цитаты": [
-            ("He who executes swiftly, wins the war.", "Napoleon"),
-            ("She who conducts herself with integrity needs no defense.", "Oprah"),
-        ],
-        "Любая тема": [
-            ("He intersects worlds without knowing.", "Sci-fi collection"),
-            ("I conduct my business with honor.", "Business Weekly"),
-        ],
+# Фиктивные функции для перевода и примеров (замени при подключении API)
+def translate_word(word):
+    return f"Перевод слова '{word}'"
+
+def translate_phrase(phrase):
+    return f"Перевод фразы: {phrase}"
+
+def get_example_with_word(word):
+    # Здесь должна быть реальная логика подбора фразы с этим словом
+    return {
+        "text": f"The word '{word}' appears in this example sentence.",
+        "source": "Фильм: Inception"
     }
 
-    # Выбираем категорию
-    category_phrases = phrases.get(category, phrases["Любая тема"])
+# Команды
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_settings[user_id] = {'translate_phrase': True}
+    user_words[user_id] = []
+    await update.message.reply_text("👋 Привет! Отправь мне английское слово, и я добавлю его в базу.")
 
-    # Ищем фразу с нужным словом
-    matching = [p for p in category_phrases if word.lower() in p[0].lower()]
-    if not matching:
-        matching = category_phrases
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔧 Меню настроек пока в разработке.")
 
-    phrase, source = random.choice(matching)
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer("Обработка кнопки")
 
-    # Примитивный перевод фразы (заглушка, можно подключить переводчик)
-    phrase_translations = {
-        "I'm executing the plan perfectly, just like always.": "Я выполняю план идеально, как всегда.",
-        "He intersects paths with destiny.": "Он пересекается с судьбой.",
-        "She conducts herself with grace.": "Она ведёт себя с грацией.",
-        "We intersect in the middle of the night.": "Мы пересекаемся посреди ночи.",
-        "She conducts the music of my heart.": "Она управляет музыкой моего сердца.",
-    }
+async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    word = update.message.text.strip()
+    translation = translate_word(word)
+    example = get_example_with_word(word)
+    phrase_translation = translate_phrase(example["text"]) if user_settings.get(user_id, {}).get('translate_phrase') else None
 
-    translation = phrase_translations.get(phrase, "")
+    user_words.setdefault(user_id, []).append(word)
 
-    return phrase, f"Фильм: {source}" if category == "Кино" else source, translation
+    response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
+    response += f"📘 Пример: {example['text']}\n"
+    if phrase_translation:
+        response += f"{phrase_translation}\n"
+    response += f"Источник: {example['source']}"
+    await update.message.reply_text(response)
+
+async def send_reminders():
+    for user_id, words in user_words.items():
+        if not words:
+            continue
+        word = random.choice(words)
+        example = get_example_with_word(word)
+        translation = translate_word(word)
+        phrase_translation = translate_phrase(example["text"]) if user_settings.get(user_id, {}).get('translate_phrase') else None
+
+        message = f"Слово '{word}' (перевод: {translation})\n"
+        message += f"📘 {example['text']}\n"
+        if phrase_translation:
+            message += f"{phrase_translation}\n"
+        message += f"Источник: {example['source']}"
+
+        # Здесь предполагается, что context у тебя глобально сохранён или замокан
+        try:
+            await application.bot.send_message(chat_id=user_id, text=message)
+        except Exception as e:
+            print(f"Не удалось отправить сообщение {user_id}: {e}")
