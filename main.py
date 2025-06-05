@@ -1,210 +1,245 @@
+import logging
 import os
 import random
-import logging
-import asyncio
-from datetime import datetime
+from datetime import time
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    ApplicationBuilder, CallbackQueryHandler, CommandHandler,
+    ContextTypes, MessageHandler, filters
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from uuid import uuid4
 import openai
 
-load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Загрузка переменных из .env.example
+load_dotenv(".env.example")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 openai.api_key = OPENAI_API_KEY
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+# Настройка логов
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO
+)
+
+# Память пользователей и слов
 user_data = {}
+word_db = {}
 
+# Планировщик
 scheduler = AsyncIOScheduler()
-scheduler.start()
 
-CATEGORIES = {
-    "Афоризмы": "aphorism",
-    "Цитаты": "quote",
-    "Кино": "movie",
-    "Песни": "song",
-    "Любая тема": "any"
+# Настройки авторассылки
+TIME_SLOTS = {
+    1: [time(11, 0)],
+    2: [time(11, 0), time(15, 0)],
+    3: [time(11, 0), time(15, 0), time(19, 0)],
 }
 
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+def get_user_settings(user_id):
+    return user_data.get(user_id, {
+        "translate": True,
+        "send_times": 1,
+        "words_per_send": 1,
+        "category": "Любая тема",
+        "translate_phrases": True,
+    })
+
+def get_translation(word):
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{
+                "role": "user",
+                "content": f"Переведи слово на русский: {word}"
+            }],
+            max_tokens=30,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Ошибка перевода '{word}': {e}")
+        return "ошибка перевода"
+
+def generate_example(word, category):
+    try:
+        prompt = f"""Придумай короткое предложение на английском с использованием слова "{word}", в стиле категории "{category}". Укажи также перевод фразы на русский и источник, например: фильм, песня, книга, интервью, бизнес-контекст. Ответ строго в формате:
+ENGLISH: ...
+RUSSIAN: ...
+SOURCE: ..."""
+
+        response = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=150
+        )
+        content = response.choices[0].message.content
+        lines = content.strip().split("\n")
+        eng = next((l.split(":", 1)[1].strip() for l in lines if l.startswith("ENGLISH:")), None)
+        rus = next((l.split(":", 1)[1].strip() for l in lines if l.startswith("RUSSIAN:")), None)
+        source = next((l.split(":", 1)[1].strip() for l in lines if l.startswith("SOURCE:")), None)
+
+        if not all([eng, rus, source]):
+            raise ValueError("Формат ответа неверный")
+        return eng, rus, source
+    except Exception as e:
+        logging.error(f"Ошибка генерации примера для '{word}': {e}")
+        return None, None, None
+
+def schedule_user_reminders(user_id, application):
+    settings = get_user_settings(user_id)
+    times = TIME_SLOTS.get(settings["send_times"], [time(11, 0)])
+
+    for t in times:
+        job_id = f"{user_id}_{t.hour}"
+        scheduler.add_job(
+            send_reminders,
+            trigger=CronTrigger(hour=t.hour, minute=t.minute),
+            args=[application, user_id],
+            id=job_id,
+            replace_existing=True,
+        )
+
+async def send_reminders(app, user_id):
+    settings = get_user_settings(user_id)
+    words = word_db.get(user_id, [])
+    if not words:
+        return
+
+    selected_words = random.sample(words, min(settings["words_per_send"], len(words)))
+    for word in selected_words:
+        translation = get_translation(word) if settings["translate"] else "перевод скрыт"
+        eng, rus, source = generate_example(word, settings["category"])
+        if not eng:
+            text = f"⚠️ Ошибка генерации примера для слова '{word}'."
+        else:
+            text = (
+                f"📘 Слово: *{word}* (перевод: {translation})\n\n"
+                f"_Пример:_\n{eng}\n{rus}\n_Источник: {source}_"
+            )
+        await app.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+
+# ---------- ХЕНДЛЕРЫ ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    user_data[user_id] = {
-        "translate_word": None,
-        "times_per_day": None,
-        "words_per_time": None,
-        "category": None,
-        "translate_phrase": None,
-        "words": []
-    }
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Привет! Я помогу тебе выучить английские слова.")
+    user_data[user_id] = get_user_settings(user_id)
+    await context.bot.send_message(
+        chat_id=user_id,
+        text="Привет! Я помогу тебе учить английские слова. Давай настроим работу.",
+    )
     await ask_translate_word(update, context)
 
-
 async def ask_translate_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("Да", callback_data="translate_word_yes"),
-        InlineKeyboardButton("Нет", callback_data="translate_word_no")
-    ]]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Нужен ли перевод слов?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def ask_times_per_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("1", callback_data="times_1"),
-        InlineKeyboardButton("2", callback_data="times_2"),
-        InlineKeyboardButton("3", callback_data="times_3")
-    ]]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Как часто ты хочешь, чтобы я писал тебе?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def ask_words_per_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("1", callback_data="words_1"),
-        InlineKeyboardButton("2", callback_data="words_2"),
-        InlineKeyboardButton("3", callback_data="words_3"),
-        InlineKeyboardButton("5", callback_data="words_5")
-    ]]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Сколько слов присылать за один раз?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(cat, callback_data=f"category_{cat}")] for cat in CATEGORIES]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Откуда брать фразы?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def ask_translate_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[
-        InlineKeyboardButton("Да", callback_data="translate_phrase_yes"),
-        InlineKeyboardButton("Нет", callback_data="translate_phrase_no")
-    ]]
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Нужен ли перевод фраз?", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def finish_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id,
-                                   text="✅ Настройка завершена! Используй /menu, чтобы изменить настройки.")
-    schedule_user_reminders(update.effective_user.id)
-
-
-def schedule_user_reminders(user_id):
-    hours_map = {
-        1: [11],
-        2: [11, 15],
-        3: [11, 15, 19]
-    }
-    times = user_data[user_id]["times_per_day"]
-    for hour in hours_map.get(times, [11]):
-        scheduler.add_job(send_reminders, "cron", hour=hour, minute=0, args=[user_id])
-
-
-async def send_reminders(user_id):
-    user = user_data.get(user_id)
-    if not user or not user["words"]:
-        return
-
-    words = random.sample(user["words"], min(user["words_per_time"], len(user["words"])))
-    bot = application.bot
-    for word in words:
-        translated, phrase, source, phrase_translated = await get_example_with_translation(word, user["category"])
-        msg = f"📌 Слово: {word}"
-        if user["translate_word"] and translated:
-            msg += f" (перевод: {translated})"
-        msg += f"\n\n📘 Пример:\n{phrase}\nИсточник: {source}"
-        if user["translate_phrase"] and phrase_translated:
-            msg += f"\n\n📙 Перевод:\n{phrase_translated}"
-        await bot.send_message(chat_id=user_id, text=msg)
-
-
-async def get_example_with_translation(word, category_label):
-    category = CATEGORIES.get(category_label, "any")
-    try:
-        prompt = f"""
-Translate the word '{word}' to Russian.
-
-Then, give one short example sentence using this word, in context of the category "{category}".
-Mention the specific source (e.g. name of the movie, song, book, etc).
-
-Format:
-Translation: ...
-Sentence: ...
-Source: ...
-Sentence_Translation: ...
-"""
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        content = response.choices[0].message.content
-        parts = dict(line.split(": ", 1) for line in content.splitlines() if ": " in line)
-        return (
-            parts.get("Translation", "ошибка перевода"),
-            parts.get("Sentence", "⚠️ Ошибка генерации примера."),
-            parts.get("Source", "неизвестно"),
-            parts.get("Sentence_Translation", "")
-        )
-    except Exception as e:
-        logging.error(f"Error generating example for word '{word}': {e}")
-        return "ошибка перевода", "⚠️ Ошибка генерации примера.", "", ""
-
+    buttons = [
+        [InlineKeyboardButton("Да", callback_data="translate_yes")],
+        [InlineKeyboardButton("Нет", callback_data="translate_no")],
+    ]
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Нужен ли перевод слов?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    user_id = query.from_user.id
     data = query.data
-    user_id = update.effective_user.id
+    await query.answer()
 
-    if data == "translate_word_yes":
-        user_data[user_id]["translate_word"] = True
-        await ask_times_per_day(update, context)
-    elif data == "translate_word_no":
-        user_data[user_id]["translate_word"] = False
-        await ask_times_per_day(update, context)
-    elif data.startswith("times_"):
-        user_data[user_id]["times_per_day"] = int(data.split("_")[1])
-        await ask_words_per_time(update, context)
-    elif data.startswith("words_"):
-        user_data[user_id]["words_per_time"] = int(data.split("_")[1])
-        await ask_category(update, context)
+    if data.startswith("translate_"):
+        user_data[user_id]["translate"] = (data == "translate_yes")
+        buttons = [
+            [InlineKeyboardButton("1", callback_data="send_1")],
+            [InlineKeyboardButton("2", callback_data="send_2")],
+            [InlineKeyboardButton("3", callback_data="send_3")],
+        ]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Как часто ты хочешь, чтобы я писал тебе?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    elif data.startswith("send_"):
+        user_data[user_id]["send_times"] = int(data.split("_")[1])
+        buttons = [
+            [InlineKeyboardButton("1", callback_data="amount_1")],
+            [InlineKeyboardButton("2", callback_data="amount_2")],
+            [InlineKeyboardButton("3", callback_data="amount_3")],
+            [InlineKeyboardButton("5", callback_data="amount_5")],
+        ]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Сколько слов присылать за раз?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    elif data.startswith("amount_"):
+        user_data[user_id]["words_per_send"] = int(data.split("_")[1])
+        buttons = [
+            [InlineKeyboardButton("Афоризмы", callback_data="category_Афоризмы")],
+            [InlineKeyboardButton("Цитаты", callback_data="category_Цитаты")],
+            [InlineKeyboardButton("Кино", callback_data="category_Кино")],
+            [InlineKeyboardButton("Песни", callback_data="category_Песни")],
+            [InlineKeyboardButton("Любая тема", callback_data="category_Любая тема")],
+        ]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Откуда брать фразы?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
     elif data.startswith("category_"):
-        category = data.split("_", 1)[1]
-        user_data[user_id]["category"] = category
-        await ask_translate_phrase(update, context)
-    elif data == "translate_phrase_yes":
-        user_data[user_id]["translate_phrase"] = True
-        await finish_setup(update, context)
-    elif data == "translate_phrase_no":
-        user_data[user_id]["translate_phrase"] = False
-        await finish_setup(update, context)
-
+        user_data[user_id]["category"] = data.split("_")[1]
+        buttons = [
+            [InlineKeyboardButton("Да", callback_data="translate_phrase_yes")],
+            [InlineKeyboardButton("Нет", callback_data="translate_phrase_no")],
+        ]
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Нужен ли перевод фраз?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    elif data.startswith("translate_phrase_"):
+        user_data[user_id]["translate_phrases"] = (data == "translate_phrase_yes")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="✅ Настройка завершена! Напиши любое английское слово, и я добавлю его в базу.",
+        )
+        schedule_user_reminders(user_id, context.application)
 
 async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    word = update.message.text.strip()
-    user_data[user_id]["words"].append(word)
+    word = update.message.text.strip().lower()
 
-    translated, phrase, source, phrase_translated = await get_example_with_translation(word, user_data[user_id]["category"])
+    translation = get_translation(word)
+    word_db.setdefault(user_id, []).append(word)
 
-    message = f"Слово '{word}' (перевод: {translated}) – добавлено в базу ✅\n\n📘 Пример:\n{phrase}\nИсточник: {source}"
-    if user_data[user_id]["translate_phrase"] and phrase_translated:
-        message += f"\n\n📙 Перевод:\n{phrase_translated}"
+    eng, rus, source = generate_example(word, get_user_settings(user_id)["category"])
+    if eng:
+        text = (
+            f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
+            f"📘 Пример:\n{eng}\n{rus}\nИсточник: {source}"
+        )
+    else:
+        text = (
+            f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
+            "📘 Пример:\n⚠️ Ошибка генерации примера."
+        )
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+    await context.bot.send_message(chat_id=user_id, text=text)
 
-
-def main():
-    global application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("menu", start))
-    application.add_handler(CallbackQueryHandler(callback_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_word))
-    application.run_polling()
-
+# ---------- ЗАПУСК ----------
 
 if __name__ == "__main__":
-    main()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    scheduler.start()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_word))
+
+    logging.info("Бот запущен...")
+    app.run_polling()
