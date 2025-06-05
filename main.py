@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from core import (
-    start, handle_message, handle_callback, menu,
+    handle_message, handle_callback, menu,
     send_reminders, add_word
 )
 from db import load_users, save_users
