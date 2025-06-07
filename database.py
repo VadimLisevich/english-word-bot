@@ -28,6 +28,9 @@ def get_user_words(user_id):
     data = load_json(DB_PATH)
     return data.get(str(user_id), [])
 
+def get_words_by_user(user_id):  # 🔧 добавляем эту функцию
+    return get_user_words(user_id)
+
 def delete_user_word(user_id, word_to_delete):
     data = load_json(DB_PATH)
     uid = str(user_id)
