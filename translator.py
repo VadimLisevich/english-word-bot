@@ -29,8 +29,10 @@ def translate_word(word: str) -> str:
 
 def translate_text(text: str) -> str:
     if not openai.api_key:
-        print(f"[ERROR] API ключ не найден")
+        print("[ERROR] API ключ не найден")
         return "ошибка перевода"
+
+    print(f"[DEBUG] Перевожу текст: {text}")
 
     try:
         response = openai.ChatCompletion.create(
@@ -42,6 +44,7 @@ def translate_text(text: str) -> str:
             temperature=0.5,
             max_tokens=100
         )
+        print(f"[DEBUG] Ответ OpenAI: {response}")
         translation = response['choices'][0]['message']['content'].strip()
         return translation
     except Exception as e:
