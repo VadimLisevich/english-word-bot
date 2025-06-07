@@ -1,38 +1,30 @@
-import openai
 import os
+import openai
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-
-def translate_word(word: str, target_language: str = "Russian") -> str:
+def translate_word(word: str) -> str:
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": f"Ты переводчик с английского на {target_language}."},
-                {"role": "user", "content": f"Переведи слово '{word}' на {target_language}. Только перевод, без кавычек и пояснений."}
-            ],
-            temperature=0.3,
-            max_tokens=20,
+                {"role": "system", "content": "You are a professional English-Russian translator."},
+                {"role": "user", "content": f"Translate the word '{word}' from English to Russian."}
+            ]
         )
-        return response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"Ошибка перевода слова: {e}")
+        return response.choices[0].message.content.strip()
+    except Exception:
         return "Примерный перевод"
 
-
-def translate_text(text: str, target_language: str = "Russian") -> str:
+def translate_text(text: str) -> str:
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": f"Ты переводчик с английского на {target_language}."},
-                {"role": "user", "content": f"Переведи следующий текст: '{text}'"}
-            ],
-            temperature=0.3,
-            max_tokens=200,
+                {"role": "system", "content": "You are a professional English-Russian translator."},
+                {"role": "user", "content": f"Translate the following English sentence to Russian:\n\n{text}"}
+            ]
         )
-        return response["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"Ошибка перевода текста: {e}")
+        return response.choices[0].message.content.strip()
+    except Exception:
         return ""
