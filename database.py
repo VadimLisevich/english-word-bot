@@ -1,123 +1,108 @@
 import sqlite3
 from datetime import datetime
 
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
+DB_NAME = 'bot_database.db'
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS user_settings (
-    user_id INTEGER PRIMARY KEY,
-    translate_words INTEGER DEFAULT 1,
-    frequency INTEGER DEFAULT 1,
-    words_per_message INTEGER DEFAULT 1,
-    category TEXT DEFAULT 'Любая тема',
-    translate_phrases INTEGER DEFAULT 1
-)
-''')
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS user_words (
-    user_id INTEGER,
-    word TEXT,
-    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-''')
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            translate_word INTEGER DEFAULT 1,
+            send_frequency INTEGER DEFAULT 1,
+            words_per_message INTEGER DEFAULT 1,
+            phrase_category TEXT DEFAULT 'Любая тема',
+            translate_phrase INTEGER DEFAULT 1
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            word TEXT,
+            translation TEXT,
+            added_at TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS phrases (
-    phrase TEXT,
-    word TEXT,
-    translation TEXT,
-    category TEXT,
-    source TEXT
-)
-''')
 
-conn.commit()
+def add_user(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
+    conn.commit()
+    conn.close()
 
-def init_user_settings(user_id):
-    cursor.execute('SELECT 1 FROM user_settings WHERE user_id = ?', (user_id,))
-    if cursor.fetchone() is None:
-        cursor.execute('''
-            INSERT INTO user_settings (user_id)
-            VALUES (?)
-        ''', (user_id,))
-        conn.commit()
 
 def set_user_setting(user_id, setting, value):
-    cursor.execute(f'''
-        UPDATE user_settings
-        SET {setting} = ?
-        WHERE user_id = ?
-    ''', (value, user_id))
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute(f'UPDATE users SET {setting} = ? WHERE user_id = ?', (value, user_id))
     conn.commit()
+    conn.close()
+
 
 def get_user_settings(user_id):
-    cursor.execute('''
-        SELECT translate_words, frequency, words_per_message, category, translate_phrases
-        FROM user_settings
-        WHERE user_id = ?
-    ''', (user_id,))
-    row = cursor.fetchone()
-    if row:
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    if result:
         return {
-            'translate_words': bool(row[0]),
-            'frequency': row[1],
-            'words_per_message': row[2],
-            'category': row[3],
-            'translate_phrases': bool(row[4])
+            'user_id': result[0],
+            'translate_word': result[1],
+            'send_frequency': result[2],
+            'words_per_message': result[3],
+            'phrase_category': result[4],
+            'translate_phrase': result[5]
         }
-    return {
-        'translate_words': True,
-        'frequency': 1,
-        'words_per_message': 1,
-        'category': 'Любая тема',
-        'translate_phrases': True
-    }
+    return None
 
-def add_user_word(user_id, word):
-    cursor.execute('''
-        INSERT INTO user_words (user_id, word, added_at)
-        VALUES (?, ?, ?)
-    ''', (user_id, word.lower(), datetime.utcnow()))
+
+def add_user_word(user_id, word, translation):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('INSERT INTO words (user_id, word, translation, added_at) VALUES (?, ?, ?, ?)',
+              (user_id, word, translation, datetime.now().isoformat()))
     conn.commit()
+    conn.close()
+
 
 def get_words_by_user(user_id):
-    cursor.execute('''
-        SELECT word FROM user_words
-        WHERE user_id = ?
-    ''', (user_id,))
-    return [row[0] for row in cursor.fetchall()]
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT word FROM words WHERE user_id = ?', (user_id,))
+    words = [row[0] for row in c.fetchall()]
+    conn.close()
+    return words
+
 
 def delete_word(user_id, word):
-    cursor.execute('''
-        DELETE FROM user_words
-        WHERE user_id = ? AND word = ?
-    ''', (user_id, word.lower()))
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('DELETE FROM words WHERE user_id = ? AND word = ?', (user_id, word))
     conn.commit()
+    conn.close()
 
-def add_phrase(word, phrase, translation, category, source):
-    cursor.execute('''
-        INSERT INTO phrases (word, phrase, translation, category, source)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (word.lower(), phrase, translation, category, source))
-    conn.commit()
 
-def get_random_phrase_with_word(word, category=None):
-    if category and category != "Любая тема":
-        cursor.execute('''
-            SELECT phrase, translation, source
-            FROM phrases
-            WHERE word = ? AND category = ?
-            ORDER BY RANDOM()
-            LIMIT 1
-        ''', (word.lower(), category))
-    else:
-        cursor.execute('''
-            SELECT phrase, translation, source
-            FROM phrases
-            WHERE word = ?
-            ORDER BY RANDOM()
-            LIMIT 1
-        ''', (word.lower(),))
-    return cursor.fetchone()
+def get_random_word(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT word FROM words WHERE user_id = ? ORDER BY RANDOM() LIMIT 1', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+
+def get_all_user_ids():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM users')
+    users = [row[0] for row in c.fetchall()]
+    conn.close()
+    return users
