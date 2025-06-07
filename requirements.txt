@@ -1,7 +1,6 @@
 python-telegram-bot==20.7
-openai>=1.0.0
 apscheduler==3.10.4
-python-dotenv==1.0.1
-nest_asyncio==1.6.0
 pytz==2024.1
-aiofiles==23.2.1
+nest_asyncio==1.6.0
+python-dotenv==1.0.1
+
