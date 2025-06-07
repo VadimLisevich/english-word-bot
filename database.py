@@ -28,7 +28,7 @@ def get_user_words(user_id):
     data = load_json(DB_PATH)
     return data.get(str(user_id), [])
 
-def get_words_by_user(user_id):  # 🔧 добавляем эту функцию
+def get_words_by_user(user_id):
     return get_user_words(user_id)
 
 def delete_user_word(user_id, word_to_delete):
@@ -39,6 +39,9 @@ def delete_user_word(user_id, word_to_delete):
         save_json(data, DB_PATH)
         return True
     return False
+
+# ✅ ДЛЯ core.py: псевдоним, чтобы не менять в импорте
+delete_word = delete_user_word
 
 # --- SETTINGS DATABASE ---
 
