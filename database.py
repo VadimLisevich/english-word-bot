@@ -1,142 +1,113 @@
-import logging
-import random
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+import sqlite3
 
-from database import (
-    add_user_word,
-    get_user_settings,
-    set_user_setting,
-    get_words_by_user,
-    delete_word,
-    get_random_phrase_with_word,
-    init_user_settings,
-)
-from translator import translate_word, translate_text
+DB_NAME = "bot_database.db"
 
-logger = logging.getLogger(__name__)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    init_user_settings(user_id)
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                translate_words BOOLEAN DEFAULT 1,
+                reminders_per_day INTEGER DEFAULT 1,
+                words_per_reminder INTEGER DEFAULT 1,
+                category TEXT DEFAULT 'Любая тема',
+                translate_phrases BOOLEAN DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS words (
+                user_id INTEGER,
+                word TEXT,
+                translation TEXT,
+                PRIMARY KEY (user_id, word)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS phrases (
+                word TEXT,
+                phrase TEXT,
+                translation TEXT,
+                category TEXT,
+                source TEXT
+            )
+        """)
+        conn.commit()
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🔤 Перевод слов", callback_data="translate_words:yes"),
-            InlineKeyboardButton("Без перевода", callback_data="translate_words:no"),
-        ],
-        [
-            InlineKeyboardButton("📆 1 раз в день", callback_data="frequency:1"),
-            InlineKeyboardButton("2 раза", callback_data="frequency:2"),
-            InlineKeyboardButton("3 раза", callback_data="frequency:3"),
-        ],
-        [
-            InlineKeyboardButton("📚 1 слово", callback_data="word_count:1"),
-            InlineKeyboardButton("2", callback_data="word_count:2"),
-            InlineKeyboardButton("3", callback_data="word_count:3"),
-            InlineKeyboardButton("5", callback_data="word_count:5"),
-        ],
-        [
-            InlineKeyboardButton("🎬 Кино", callback_data="category:Кино"),
-            InlineKeyboardButton("🎵 Песни", callback_data="category:Песни"),
-            InlineKeyboardButton("📜 Афоризмы", callback_data="category:Афоризмы"),
-            InlineKeyboardButton("🎭 Любая тема", callback_data="category:Любая тема"),
-        ],
-        [
-            InlineKeyboardButton("🈯 Перевод фраз", callback_data="translate_phrases:yes"),
-            InlineKeyboardButton("Без перевода", callback_data="translate_phrases:no"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Привет! Давай настроим твоего помощника 👇", reply_markup=reply_markup)
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+def init_user_settings(user_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO users (user_id) VALUES (?)
+            """, (user_id,))
+            conn.commit()
 
-    user_id = query.from_user.id
-    data = query.data
-    setting = data.split(":")[0]
-    value = data.split(":")[1]
 
-    if setting == "category":
-        setting = "phrase_category"
+def get_user_settings(user_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row:
+            columns = [col[0] for col in cursor.description]
+            return dict(zip(columns, row))
+        return {}
 
-    set_user_setting(user_id, setting, value)
-    await query.edit_message_text(f"✅ Настройка обновлена: {setting} = {value}")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    word = update.message.text.strip()
+def set_user_setting(user_id, key, value):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
+        conn.commit()
 
-    translation = translate_word(word)
-    add_user_word(user_id, word, translation)
 
-    phrase_data = get_random_phrase_with_word(word, get_user_settings(user_id).get("phrase_category", "Любая тема"))
-    if phrase_data:
-        phrase = phrase_data["text"]
-        source = phrase_data["source"]
-        phrase_translation = ""
-        if get_user_settings(user_id).get("translate_phrases") == "yes":
-            phrase_translation = translate_text(phrase)
-        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
-        response += f"📘 Пример: {phrase}\n"
-        if phrase_translation:
-            response += f"📗 Перевод: {phrase_translation}\n"
-        response += f"Источник: {source}"
-    else:
-        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n"
-        response += "(Фраза не найдена в выбранной категории)"
+def add_user_word(user_id, word, translation):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO words (user_id, word, translation) VALUES (?, ?, ?)
+        """, (user_id, word, translation))
+        conn.commit()
 
-    await update.message.reply_text(response)
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+def get_words_by_user(user_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT word, translation FROM words WHERE user_id = ?", (user_id,))
+        return cursor.fetchall()
 
-async def send_reminders(application):
-    from main import send_word_to_user
-    from database import get_all_user_ids
-    import datetime
 
-    now = datetime.datetime.now()
-    hour = now.hour
+def delete_word(user_id, word):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM words WHERE user_id = ? AND word = ?", (user_id, word))
+        conn.commit()
 
-    for user_id in get_all_user_ids():
-        settings = get_user_settings(user_id)
-        frequency = int(settings.get("frequency", 1))
 
-        if (frequency == 1 and hour == 11) or \
-           (frequency == 2 and hour in [11, 15]) or \
-           (frequency == 3 and hour in [11, 15, 19]):
+def get_all_user_ids():
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        return [row[0] for row in cursor.fetchall()]
 
-            count = int(settings.get("word_count", 1))
-            for _ in range(count):
-                await send_word_to_user(application, user_id)
 
-async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Пожалуйста, укажи слово после команды /add")
-        return
-
-    word = context.args[0].strip()
-    translation = translate_word(word)
-    add_user_word(user_id, word, translation)
-
-    phrase_data = get_random_phrase_with_word(word, get_user_settings(user_id).get("phrase_category", "Любая тема"))
-    if phrase_data:
-        phrase = phrase_data["text"]
-        source = phrase_data["source"]
-        phrase_translation = ""
-        if get_user_settings(user_id).get("translate_phrases") == "yes":
-            phrase_translation = translate_text(phrase)
-        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
-        response += f"📘 Пример: {phrase}\n"
-        if phrase_translation:
-            response += f"📗 Перевод: {phrase_translation}\n"
-        response += f"Источник: {source}"
-    else:
-        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n"
-        response += "(Фраза не найдена в выбранной категории)"
-
-    await update.message.reply_text(response)
+def get_random_phrase_with_word(word, category='Любая тема'):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        if category == "Любая тема":
+            cursor.execute("""
+                SELECT phrase, translation, source FROM phrases
+                WHERE LOWER(phrase) LIKE '%' || LOWER(?) || '%'
+                ORDER BY RANDOM() LIMIT 1
+            """, (word,))
+        else:
+            cursor.execute("""
+                SELECT phrase, translation, source FROM phrases
+                WHERE LOWER(phrase) LIKE '%' || LOWER(?) || '%' AND category = ?
+                ORDER BY RANDOM() LIMIT 1
+            """, (word, category))
+        return cursor.fetchone()
