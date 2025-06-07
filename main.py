@@ -1,42 +1,65 @@
-import logging
 import os
-import pytz
-from datetime import time
-from dotenv import load_dotenv
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    MessageHandler, CallbackQueryHandler, filters
-)
+import logging
+import nest_asyncio
+import asyncio
+from datetime import datetime
+from pytz import timezone
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from core import start, menu, handle_callback, add_word, send_reminders
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CallbackQueryHandler,
+    CommandHandler,
+    filters,
+)
+from core import (
+    start,
+    menu,
+    handle_callback,
+    handle_message,
+    send_reminders,
+)
 
-load_dotenv()
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# Инициализация логов
+# Настройка логирования
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format='%(asctime)s | %(levelname)s | %(message)s',
     level=logging.INFO
 )
 
-# Инициализация бота
-application = ApplicationBuilder().token(TOKEN).build()
+# Читаем токен из переменных окружения
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment variables")
 
-# Хэндлеры
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("menu", menu))
-application.add_handler(CallbackQueryHandler(handle_callback))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_word))
+# Для совместимости с Render и Jupyter
+nest_asyncio.apply()
 
-# Планировщик
-scheduler = AsyncIOScheduler(timezone=pytz.timezone("Europe/Lisbon"))
+# Создаём планировщик задач
+scheduler = AsyncIOScheduler(timezone=timezone("Europe/Lisbon"))
+
+# Устанавливаем задания на авторассылку в 11:00, 15:00 и 19:00
 scheduler.add_job(send_reminders, CronTrigger(hour=11, minute=0))
 scheduler.add_job(send_reminders, CronTrigger(hour=15, minute=0))
 scheduler.add_job(send_reminders, CronTrigger(hour=19, minute=0))
 scheduler.start()
+logging.info("Scheduler started")
+
+# Основная асинхронная функция запуска бота
+async def main():
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    # Обработчики команд и сообщений
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    logging.info("Bot started")
+    await application.run_polling()
 
 # Запуск
 if __name__ == "__main__":
-    application.run_polling()
+    asyncio.run(main())
