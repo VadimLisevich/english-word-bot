@@ -8,7 +8,7 @@ def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Таблица пользователей с настройками
+    # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -20,7 +20,7 @@ def create_tables():
         )
     ''')
 
-    # Таблица слов пользователя
+    # Таблица слов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,21 +35,29 @@ def create_tables():
     conn.close()
 
 
-def add_user_if_not_exists(user_id: int):
+def add_user(user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if cursor.fetchone() is None:
-        cursor.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     conn.commit()
     conn.close()
+
+
+def add_user_if_not_exists(user_id: int):
+    add_user(user_id)
+
+
+def init_user_settings(user_id: int):
+    add_user(user_id)
 
 
 def add_user_word(user_id: int, word: str, translation: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO words (user_id, word, translation) VALUES (?, ?, ?)",
-                   (user_id, word, translation))
+    cursor.execute(
+        "INSERT INTO words (user_id, word, translation) VALUES (?, ?, ?)",
+        (user_id, word, translation),
+    )
     conn.commit()
     conn.close()
 
@@ -109,7 +117,3 @@ def get_all_user_ids():
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
-
-
-def init_user_settings(user_id: int):
-    add_user_if_not_exists(user_id)
