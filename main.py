@@ -1,61 +1,37 @@
-import logging
 import asyncio
+import logging
 import nest_asyncio
-from telegram.ext import ApplicationBuilder
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, CallbackQueryHandler, CommandHandler
 from core import (
-    start,
-    handle_message_func,
-    handle_callback,
-    menu,
-    send_reminders
+    start, handle_callback, handle_message_func, menu
 )
-from database import init_db, get_all_user_ids, get_user_settings
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from os import getenv
-from dotenv import load_dotenv
-
-load_dotenv()
-
-TOKEN = getenv("TELEGRAM_BOT_TOKEN")
+from database import init_db
+from scheduler import schedule_reminders
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format='%(asctime)s | %(levelname)s | %(message)s',
     level=logging.INFO
 )
 
 nest_asyncio.apply()
 init_db()
 
-application = ApplicationBuilder().token(TOKEN).build()
-application.add_handler(start)
-application.add_handler(menu)
-application.add_handler(handle_callback)
-application.add_handler(handle_message_func)
+from os import getenv
+from dotenv import load_dotenv
 
-scheduler = AsyncIOScheduler()
-
-def schedule_reminders(app):
-    user_ids = get_all_user_ids()
-    for user_id in user_ids:
-        settings = get_user_settings(user_id)
-        times = {
-            1: [(11, 0)],
-            2: [(11, 0), (15, 0)],
-            3: [(11, 0), (15, 0), (19, 0)],
-        }.get(settings.get("reminders_per_day", 1), [(11, 0)])
-
-        for hour, minute in times:
-            scheduler.add_job(
-                send_reminders,
-                CronTrigger(hour=hour, minute=minute),
-                args=[app, user_id]
-            )
-
-schedule_reminders(application)
-scheduler.start()
+load_dotenv()
+TOKEN = getenv("TELEGRAM_BOT_TOKEN")
 
 async def main():
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message_func))
+
+    schedule_reminders(application)
     await application.run_polling()
 
-asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())
