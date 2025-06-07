@@ -1,8 +1,8 @@
 import json
 import os
 
-WORDS_DB_PATH = "words_db.json"
-SETTINGS_DB_PATH = "settings_db.json"
+DB_PATH = "db.json"
+SETTINGS_DB_PATH = "settings.json"
 
 def load_json(path):
     if not os.path.exists(path):
@@ -14,43 +14,55 @@ def save_json(data, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# Работа со словами
+# --- WORDS DATABASE ---
+
+def add_user_word(user_id, word_data):
+    data = load_json(DB_PATH)
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = []
+    data[uid].append(word_data)
+    save_json(data, DB_PATH)
+
 def get_user_words(user_id):
-    data = load_json(WORDS_DB_PATH)
+    data = load_json(DB_PATH)
     return data.get(str(user_id), [])
 
-def add_user_word(user_id, word, translation):
-    data = load_json(WORDS_DB_PATH)
-    user_id = str(user_id)
-    if user_id not in data:
-        data[user_id] = []
-    data[user_id].append({"word": word, "translation": translation})
-    save_json(data, WORDS_DB_PATH)
+def delete_user_word(user_id, word_to_delete):
+    data = load_json(DB_PATH)
+    uid = str(user_id)
+    if uid in data:
+        data[uid] = [w for w in data[uid] if w['word'].lower() != word_to_delete.lower()]
+        save_json(data, DB_PATH)
+        return True
+    return False
 
-def remove_user_word(user_id, word):
-    data = load_json(WORDS_DB_PATH)
-    user_id = str(user_id)
-    if user_id in data:
-        data[user_id] = [w for w in data[user_id] if w["word"] != word]
-        save_json(data, WORDS_DB_PATH)
+# --- SETTINGS DATABASE ---
 
-# Работа с настройками
 def get_user_settings(user_id):
     data = load_json(SETTINGS_DB_PATH)
     return data.get(str(user_id), {})
 
-def update_user_settings(user_id, new_settings):
+def set_user_setting(user_id, key, value):
     data = load_json(SETTINGS_DB_PATH)
-    data[str(user_id)] = new_settings
+    uid = str(user_id)
+    if uid not in data:
+        data[uid] = {}
+    data[uid][key] = value
     save_json(data, SETTINGS_DB_PATH)
 
-def clear_user_data(user_id):
-    uid = str(user_id)
-    words = load_json(WORDS_DB_PATH)
-    settings = load_json(SETTINGS_DB_PATH)
-    if uid in words:
-        del words[uid]
-        save_json(words, WORDS_DB_PATH)
-    if uid in settings:
-        del settings[uid]
-        save_json(settings, SETTINGS_DB_PATH)
+def set_default_settings(user_id):
+    default = {
+        "translate_words": True,
+        "frequency": 1,
+        "words_per_message": 1,
+        "category": "Любая тема",
+        "translate_examples": True,
+    }
+    data = load_json(SETTINGS_DB_PATH)
+    data[str(user_id)] = default
+    save_json(data, SETTINGS_DB_PATH)
+
+def get_user_setting(user_id, key, default=None):
+    settings = get_user_settings(user_id)
+    return settings.get(key, default)
