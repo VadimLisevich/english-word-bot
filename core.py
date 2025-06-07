@@ -1,114 +1,147 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+import logging
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    ContextTypes,
+)
+
 from database import (
-    get_user_settings,
+    init_user_settings,
     set_user_setting,
+    get_user_settings,
     add_user_word,
     get_words_by_user,
     delete_word,
     get_random_phrase_with_word,
 )
-from translation import translate_word, translate_phrase
-from scheduler import schedule_reminders
-import random
+from translator import translate_word, translate_text
 
-settings_questions = [
-    {"key": "translate_word", "question": "Нужен ли перевод слов?", "options": [("Да", "yes"), ("Нет", "no")]},
-    {"key": "frequency", "question": "Как часто отправлять фразы?", "options": [("1 раз в день", "1"), ("2 раза в день", "2"), ("3 раза в день", "3")]},
-    {"key": "words_per_message", "question": "Сколько слов присылать за раз?", "options": [("1", "1"), ("2", "2"), ("3", "3"), ("5", "5")]},
-    {"key": "phrase_topic", "question": "Откуда брать фразы?", "options": [("Афоризмы", "Aphorisms"), ("Цитаты", "Quotes"), ("Кино", "Movies"), ("Песни", "Songs"), ("Любая тема", "Any")]},
-    {"key": "translate_phrase", "question": "Нужен ли перевод фраз?", "options": [("Да", "yes"), ("Нет", "no")]},
-]
-
-user_states = {}
-
-def get_settings_keyboard(question_data):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(text, callback_data=f"set:{question_data['key']}:{value}")]
-        for text, value in question_data["options"]
-    ])
+logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я бот для изучения английских слов. Давай настроим твой опыт 📚")
-    user_states[update.effective_user.id] = 0
-    await ask_next_setting(update, context)
+    user_id = update.effective_user.id
+    init_user_settings(user_id)
+
+    keyboard = [
+        [InlineKeyboardButton("🔠 Перевод слов", callback_data="setting_translate_words")],
+        [InlineKeyboardButton("🕒 Частота рассылки", callback_data="setting_frequency")],
+        [InlineKeyboardButton("🔢 Кол-во слов за раз", callback_data="setting_words_per_message")],
+        [InlineKeyboardButton("🎭 Источник фраз", callback_data="setting_category")],
+        [InlineKeyboardButton("🌍 Перевод фраз", callback_data="setting_translate_phrases")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Привет! Я помогу тебе запомнить английские слова 📚\n\nВыбери настройки:",
+        reply_markup=reply_markup
+    )
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_states[update.effective_user.id] = 0
-    await ask_next_setting(update, context)
-
-async def ask_next_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    state_index = user_states.get(user_id, 0)
-    if state_index < len(settings_questions):
-        question_data = settings_questions[state_index]
-        await context.bot.send_message(chat_id=user_id, text=question_data["question"], reply_markup=get_settings_keyboard(question_data))
-    else:
-        await context.bot.send_message(chat_id=user_id, text="✅ Настройка завершена. Используй /menu для повторной настройки.")
-        schedule_reminders(context.application, user_id)
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    keyboard = [
+        [InlineKeyboardButton("🔠 Перевод слов", callback_data="setting_translate_words")],
+        [InlineKeyboardButton("🕒 Частота рассылки", callback_data="setting_frequency")],
+        [InlineKeyboardButton("🔢 Кол-во слов за раз", callback_data="setting_words_per_message")],
+        [InlineKeyboardButton("🎭 Источник фраз", callback_data="setting_category")],
+        [InlineKeyboardButton("🌍 Перевод фраз", callback_data="setting_translate_phrases")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.reply_text(
+        "Настройки:",
+        reply_markup=reply_markup
+    )
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
     user_id = query.from_user.id
     data = query.data
 
-    if data.startswith("set:"):
-        _, key, value = data.split(":")
-        set_user_setting(user_id, key, value)
-        user_states[user_id] += 1
-        await ask_next_setting(update, context)
-    elif data.startswith("delete:"):
-        _, word = data.split(":")
-        delete_word(user_id, word)
-        await query.edit_message_text(f"Слово '{word}' удалено из базы ❌")
+    await query.answer()
+
+    if data.startswith("setting_"):
+        setting = data.replace("setting_", "")
+        options = {
+            "translate_words": [("Да", 1), ("Нет", 0)],
+            "frequency": [("1 раз", 1), ("2 раза", 2), ("3 раза", 3)],
+            "words_per_message": [("1", 1), ("2", 2), ("3", 3), ("5", 5)],
+            "category": [("Афоризмы", "Афоризмы"), ("Цитаты", "Цитаты"),
+                         ("Кино", "Кино"), ("Песни", "Песни"), ("Любая тема", "Любая тема")],
+            "translate_phrases": [("Да", 1), ("Нет", 0)],
+        }
+        buttons = [
+            [InlineKeyboardButton(text, callback_data=f"value_{setting}_{value}")]
+            for text, value in options.get(setting, [])
+        ]
+        markup = InlineKeyboardMarkup(buttons)
+        await query.message.reply_text(f"Выбери значение для {setting}:", reply_markup=markup)
+
+    elif data.startswith("value_"):
+        _, setting, value = data.split("_", 2)
+        if setting in ["translate_words", "frequency", "words_per_message", "translate_phrases"]:
+            set_user_setting(user_id, setting, int(value))
+        elif setting == "category":
+            set_user_setting(user_id, setting, value)
+
+        await query.message.reply_text("✅ Настройка сохранена!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     word = update.message.text.strip()
     settings = get_user_settings(user_id)
-    translation = translate_word(word) if settings.get("translate_word") == "yes" else None
 
     add_user_word(user_id, word)
 
-    phrase_data = get_random_phrase_with_word(word, settings.get("phrase_topic", "Any"))
+    translation = translate_word(word) if settings["translate_words"] else None
+
+    phrase_data = get_random_phrase_with_word(word, settings["category"])
     if not phrase_data:
-        await update.message.reply_text(f"Слово '{word}' (перевод: {translation or 'без перевода'}) – добавлено в базу ✅\n❗️Не удалось найти пример фразы с этим словом.")
+        await update.message.reply_text(
+            f"Слово '{word}' (перевод: {translation or '—'}) – добавлено в базу ✅\n"
+            "Но пример с этим словом не найден 😔"
+        )
         return
 
-    phrase, source = phrase_data
-    phrase_translation = translate_phrase(phrase) if settings.get("translate_phrase") == "yes" else None
+    phrase, phrase_translation, source = phrase_data
+    full_translation = translate_text(phrase) if settings["translate_phrases"] else None
 
-    response = f"Слово '{word}' (перевод: {translation or 'без перевода'}) – добавлено в базу ✅\n\n📘 {phrase}"
-    if phrase_translation:
-        response += f"\n📍 Перевод: {phrase_translation}"
-    if source:
-        response += f"\nИсточник: {source}"
+    response = f"Слово '{word}' (перевод: {translation or '—'}) – добавлено в базу ✅\n\n"
+    response += f"📘 {phrase}\n"
+    if settings["translate_phrases"]:
+        response += f"📙 Перевод: {full_translation or phrase_translation}\n"
+    response += f"Источник: {source}"
+
     await update.message.reply_text(response)
 
 async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
-    app = context.application
-    all_users = get_user_settings()  # возвращает словарь {user_id: settings}
-    for user_id, settings in all_users.items():
-        words = get_words_by_user(user_id)
-        if not words:
+    from random import choice
+    job = context.job
+    user_id = job.chat_id
+    settings = get_user_settings(user_id)
+    words = get_words_by_user(user_id)
+
+    if not words:
+        return
+
+    from telegram import Bot
+    bot: Bot = context.bot
+
+    for _ in range(settings["words_per_message"]):
+        word = choice(words)
+        translation = translate_word(word) if settings["translate_words"] else None
+        phrase_data = get_random_phrase_with_word(word, settings["category"])
+        if not phrase_data:
             continue
 
-        words_sample = random.sample(words, min(len(words), int(settings.get("words_per_message", 1))))
-        for word in words_sample:
-            translation = translate_word(word) if settings.get("translate_word") == "yes" else None
-            phrase_data = get_random_phrase_with_word(word, settings.get("phrase_topic", "Any"))
-            if not phrase_data:
-                continue
-            phrase, source = phrase_data
-            phrase_translation = translate_phrase(phrase) if settings.get("translate_phrase") == "yes" else None
+        phrase, phrase_translation, source = phrase_data
+        full_translation = translate_text(phrase) if settings["translate_phrases"] else None
 
-            text = f"Слово '{word}' (перевод: {translation or 'без перевода'})"
-            text += f"\n📘 {phrase}"
-            if phrase_translation:
-                text += f"\n📍 Перевод: {phrase_translation}"
-            if source:
-                text += f"\nИсточник: {source}"
+        message = f"Слово '{word}' (перевод: {translation or '—'})\n\n📘 {phrase}\n"
+        if settings["translate_phrases"]:
+            message += f"📙 Перевод: {full_translation or phrase_translation}\n"
+        message += f"Источник: {source}"
 
-            await app.bot.send_message(chat_id=user_id, text=text)
+        await bot.send_message(chat_id=user_id, text=message)
