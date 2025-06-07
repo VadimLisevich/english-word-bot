@@ -4,6 +4,10 @@ from datetime import datetime
 DB_NAME = "bot_database.db"
 
 
+def init_db():
+    create_tables()
+
+
 def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
