@@ -1,97 +1,142 @@
-import sqlite3
+import logging
+import random
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
 
-conn = sqlite3.connect("users.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    translate_word INTEGER DEFAULT 1,
-    reminders_per_day INTEGER DEFAULT 1,
-    words_per_reminder INTEGER DEFAULT 1,
-    phrase_category TEXT DEFAULT 'Любая тема',
-    translate_phrase INTEGER DEFAULT 1
+from database import (
+    add_user_word,
+    get_user_settings,
+    set_user_setting,
+    get_words_by_user,
+    delete_word,
+    get_random_phrase_with_word,
+    init_user_settings,
 )
-""")
+from translator import translate_word, translate_text
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS words (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    word TEXT,
-    translation TEXT
-)
-""")
+logger = logging.getLogger(__name__)
 
-def init_user_settings(user_id):
-    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-    if not cursor.fetchone():
-        cursor.execute(
-            "INSERT INTO users (user_id) VALUES (?)",
-            (user_id,)
-        )
-        conn.commit()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    init_user_settings(user_id)
 
-def set_user_setting(user_id, key, value):
-    cursor.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
-    conn.commit()
-
-def get_user_settings(user_id):
-    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if row:
-        return {
-            "translate_word": row[1],
-            "reminders_per_day": row[2],
-            "words_per_reminder": row[3],
-            "phrase_category": row[4],
-            "translate_phrase": row[5]
-        }
-    return None
-
-def add_user_word(user_id, word, translation):
-    cursor.execute(
-        "INSERT INTO words (user_id, word, translation) VALUES (?, ?, ?)",
-        (user_id, word, translation)
-    )
-    conn.commit()
-
-def get_words_by_user(user_id):
-    cursor.execute("SELECT word, translation FROM words WHERE user_id = ?", (user_id,))
-    return cursor.fetchall()
-
-def delete_word(user_id, word):
-    cursor.execute("DELETE FROM words WHERE user_id = ? AND word = ?", (user_id, word))
-    conn.commit()
-
-def get_all_user_ids():
-    cursor.execute("SELECT user_id FROM users")
-    return [row[0] for row in cursor.fetchall()]
-
-def get_random_phrase_with_word(word, category):
-    # Заглушка – ты можешь заменить этот блок на свой парсер/базу фраз
-    dummy_phrases = {
-        "Кино": [
-            ("I'm executing the plan perfectly, just like always.", "Фильм: Inception"),
-            ("May the Force be with you.", "Фильм: Star Wars"),
+    keyboard = [
+        [
+            InlineKeyboardButton("🔤 Перевод слов", callback_data="translate_words:yes"),
+            InlineKeyboardButton("Без перевода", callback_data="translate_words:no"),
         ],
-        "Песни": [
-            ("Cause baby you're a firework!", "Песня: Firework — Katy Perry"),
-            ("We will, we will rock you!", "Песня: Queen"),
+        [
+            InlineKeyboardButton("📆 1 раз в день", callback_data="frequency:1"),
+            InlineKeyboardButton("2 раза", callback_data="frequency:2"),
+            InlineKeyboardButton("3 раза", callback_data="frequency:3"),
         ],
-        "Афоризмы": [
-            ("The only limit to our realization of tomorrow is our doubts of today.", "Афоризм: F.D. Roosevelt"),
+        [
+            InlineKeyboardButton("📚 1 слово", callback_data="word_count:1"),
+            InlineKeyboardButton("2", callback_data="word_count:2"),
+            InlineKeyboardButton("3", callback_data="word_count:3"),
+            InlineKeyboardButton("5", callback_data="word_count:5"),
         ],
-        "Цитаты": [
-            ("Be yourself; everyone else is already taken.", "Цитата: Oscar Wilde"),
+        [
+            InlineKeyboardButton("🎬 Кино", callback_data="category:Кино"),
+            InlineKeyboardButton("🎵 Песни", callback_data="category:Песни"),
+            InlineKeyboardButton("📜 Афоризмы", callback_data="category:Афоризмы"),
+            InlineKeyboardButton("🎭 Любая тема", callback_data="category:Любая тема"),
         ],
-        "Любая тема": [
-            ("The quick brown fox jumps over the lazy dog.", "Пример: Английская скороговорка"),
-        ]
-    }
+        [
+            InlineKeyboardButton("🈯 Перевод фраз", callback_data="translate_phrases:yes"),
+            InlineKeyboardButton("Без перевода", callback_data="translate_phrases:no"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("Привет! Давай настроим твоего помощника 👇", reply_markup=reply_markup)
 
-    phrases = dummy_phrases.get(category, dummy_phrases["Любая тема"])
-    for phrase, source in phrases:
-        if word.lower() in phrase.lower():
-            return phrase, source
-    return phrases[0]
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+    setting = data.split(":")[0]
+    value = data.split(":")[1]
+
+    if setting == "category":
+        setting = "phrase_category"
+
+    set_user_setting(user_id, setting, value)
+    await query.edit_message_text(f"✅ Настройка обновлена: {setting} = {value}")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    word = update.message.text.strip()
+
+    translation = translate_word(word)
+    add_user_word(user_id, word, translation)
+
+    phrase_data = get_random_phrase_with_word(word, get_user_settings(user_id).get("phrase_category", "Любая тема"))
+    if phrase_data:
+        phrase = phrase_data["text"]
+        source = phrase_data["source"]
+        phrase_translation = ""
+        if get_user_settings(user_id).get("translate_phrases") == "yes":
+            phrase_translation = translate_text(phrase)
+        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
+        response += f"📘 Пример: {phrase}\n"
+        if phrase_translation:
+            response += f"📗 Перевод: {phrase_translation}\n"
+        response += f"Источник: {source}"
+    else:
+        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n"
+        response += "(Фраза не найдена в выбранной категории)"
+
+    await update.message.reply_text(response)
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+async def send_reminders(application):
+    from main import send_word_to_user
+    from database import get_all_user_ids
+    import datetime
+
+    now = datetime.datetime.now()
+    hour = now.hour
+
+    for user_id in get_all_user_ids():
+        settings = get_user_settings(user_id)
+        frequency = int(settings.get("frequency", 1))
+
+        if (frequency == 1 and hour == 11) or \
+           (frequency == 2 and hour in [11, 15]) or \
+           (frequency == 3 and hour in [11, 15, 19]):
+
+            count = int(settings.get("word_count", 1))
+            for _ in range(count):
+                await send_word_to_user(application, user_id)
+
+async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("Пожалуйста, укажи слово после команды /add")
+        return
+
+    word = context.args[0].strip()
+    translation = translate_word(word)
+    add_user_word(user_id, word, translation)
+
+    phrase_data = get_random_phrase_with_word(word, get_user_settings(user_id).get("phrase_category", "Любая тема"))
+    if phrase_data:
+        phrase = phrase_data["text"]
+        source = phrase_data["source"]
+        phrase_translation = ""
+        if get_user_settings(user_id).get("translate_phrases") == "yes":
+            phrase_translation = translate_text(phrase)
+        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n\n"
+        response += f"📘 Пример: {phrase}\n"
+        if phrase_translation:
+            response += f"📗 Перевод: {phrase_translation}\n"
+        response += f"Источник: {source}"
+    else:
+        response = f"Слово '{word}' (перевод: {translation}) – добавлено в базу ✅\n"
+        response += "(Фраза не найдена в выбранной категории)"
+
+    await update.message.reply_text(response)
