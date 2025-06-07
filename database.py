@@ -34,6 +34,9 @@ def add_user(user_id: int):
     conn.commit()
     conn.close()
 
+def init_user_settings(user_id: int):
+    add_user(user_id)
+
 def set_user_setting(user_id: int, key: str, value):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
