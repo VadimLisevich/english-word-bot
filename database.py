@@ -1,86 +1,40 @@
-import sqlite3
-import random
+import json
+import os
 
-DB_NAME = "words.db"
+DB_PATH = "words_db.json"
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS words (
-        user_id INTEGER,
-        word TEXT
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        user_id INTEGER PRIMARY KEY,
-        translate_words BOOLEAN,
-        frequency INTEGER,
-        words_per_message INTEGER,
-        category TEXT,
-        translate_phrases BOOLEAN
-    )""")
-    conn.commit()
-    conn.close()
+def load_words():
+    if not os.path.exists(DB_PATH):
+        return {}
+    with open(DB_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def add_word(user_id, word):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO words (user_id, word) VALUES (?, ?)", (user_id, word))
-    conn.commit()
-    conn.close()
+def save_words(data):
+    with open(DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_words_by_user(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT word FROM words WHERE user_id = ?", (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+def get_user_words(user_id):
+    data = load_words()
+    return data.get(str(user_id), [])
 
-def delete_word(user_id, word):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM words WHERE user_id = ? AND word = ?", (user_id, word))
-    conn.commit()
-    conn.close()
+def add_user_word(user_id, word, translation):
+    data = load_words()
+    user_id = str(user_id)
+    if user_id not in data:
+        data[user_id] = []
+    data[user_id].append({"word": word, "translation": translation})
+    save_words(data)
 
-def get_random_user_words(user_id, count):
-    words = get_words_by_user(user_id)
-    return random.sample(words, min(count, len(words)))
+def remove_user_word(user_id, word):
+    data = load_words()
+    user_id = str(user_id)
+    if user_id in data:
+        data[user_id] = [w for w in data[user_id] if w["word"] != word]
+        save_words(data)
 
-def get_user_settings(user_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT * FROM settings WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "user_id": row[0],
-            "translate_words": bool(row[1]),
-            "frequency": row[2],
-            "words_per_message": row[3],
-            "category": row[4],
-            "translate_phrases": bool(row[5])
-        }
-    return {
-        "user_id": user_id,
-        "translate_words": True,
-        "frequency": 1,
-        "words_per_message": 1,
-        "category": "Любая тема",
-        "translate_phrases": True
-    }
-
-def set_user_setting(user_id, setting_key, value):
-    settings = get_user_settings(user_id)
-    settings[setting_key] = value
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("""
-        INSERT OR REPLACE INTO settings (user_id, translate_words, frequency, words_per_message, category, translate_phrases)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (user_id, settings["translate_words"], settings["frequency"], settings["words_per_message"], settings["category"], settings["translate_phrases"]))
-    conn.commit()
-    conn.close()
+def clear_user_data(user_id):
+    data = load_words()
+    user_id = str(user_id)
+    if user_id in data:
+        del data[user_id]
+        save_words(data)
